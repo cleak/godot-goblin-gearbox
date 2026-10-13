@@ -269,6 +269,25 @@ def test_the_allowlist_exempts_files_and_folders_and_must_not_go_stale(
     assert chk.main(["generated"], root=root) == 0  # a narrowed run cannot judge the list
 
 
+def test_a_folder_entry_covers_a_script_whatever_the_case_of_its_suffix(
+    tmp_path: Path, capsys
+) -> None:
+    """`b.GD` is a script to Godot and to the scan on every system. The entry that exempts
+    it must not read as stale on Linux, where a search for `*.gd` minds the letter case."""
+    files = {"generated/b.GD": BAD, ALLOWLIST: "generated/ | written by the exporter\n"}
+    root = _project(tmp_path, files)
+    assert chk.main([], root=root) == 0
+    assert "stale" not in capsys.readouterr().out
+
+
+def test_a_path_takes_either_slash_on_every_system(tmp_path: Path, capsys) -> None:
+    root = _project(tmp_path, {"scripts/game/a.gd": BAD, "ui/b.gd": GOOD})
+    for spelled in ("scripts/game", "scripts\\game", "scripts\\game\\a.gd", str(root / "scripts")):
+        assert chk.main([spelled], root=root) == 1, spelled
+        assert "scripts/game/a.gd:2" in capsys.readouterr().out, spelled
+    assert chk.main(["ui\\"], root=root) == 0
+
+
 def test_an_allowlist_entry_without_a_reason_is_an_error(tmp_path: Path, capsys) -> None:
     root = _project(tmp_path, {"scripts/a.gd": BAD, ALLOWLIST: "scripts/a.gd\n"})
     assert chk.main([], root=root) == 2

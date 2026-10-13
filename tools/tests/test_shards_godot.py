@@ -6,6 +6,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -21,6 +22,11 @@ import godot_binary  # noqa: E402
 import kit_config  # noqa: E402
 
 STANDARD = "4.7.2.stable.official.abc123"
+# The rules that differ by system take the system as an argument: every branch runs here.
+WINDOWS = "windows_x86_64"
+LINUX = "linux_x86_64"
+MACOS = "macos_universal"
+BUNDLE_PROGRAM = ("Godot.app", "Contents", "MacOS", "Godot")
 MONO = "4.7.2.stable.mono.official.abc123"
 OLDER = "4.6.1.stable.official.def456"
 
@@ -54,8 +60,12 @@ def _config(root: Path, **godot) -> kit_config.KitConfig:
     return kit_config.load(root)
 
 
-def _resolve(root: Path, env: dict[str, str] | None = None, **godot):
-    return Path(godot_binary.resolve(_config(root, **godot), {"PATH": "", **(env or {})}))
+def _resolve(
+    root: Path, env: dict[str, str] | None = None, platform: str = "windows", **godot
+) -> Path:
+    config = _config(root, **godot)
+    env = {"PATH": "", **(env or {})}
+    return Path(godot_binary.resolve(config, env, platform=platform, architecture="x86_64"))
 
 
 def test_the_order_is_env_then_toolchain_then_search_roots_then_path(
@@ -85,7 +95,12 @@ def test_the_order_is_env_then_toolchain_then_search_roots_then_path(
 def test_no_argument_names_the_binary() -> None:
     """A tool that took the binary as an argument would run any program its command line
     names: the environment and kit.json are the only ways in."""
-    assert list(inspect.signature(godot_binary.resolve).parameters) == ["config", "env"]
+    assert list(inspect.signature(godot_binary.resolve).parameters) == [
+        "config",
+        "env",
+        "platform",
+        "architecture",
+    ]
 
 
 def test_an_explicit_binary_is_never_skipped(machine, tmp_path: Path) -> None:
@@ -118,7 +133,7 @@ def test_a_folder_gives_the_newest_patch_and_the_console_launcher_first(machine)
         "readme.txt",
     ):
         plant(folder / name)
-    names = [path.name for path in godot_binary.folder_candidates(folder, "4.7")]
+    names = [path.name for path in godot_binary.folder_candidates(folder, "4.7", build=WINDOWS)]
     assert names == [
         "Godot_v4.7.10-stable_win64_console.exe",
         "Godot_v4.7.2-stable_win64_console.exe",
@@ -127,17 +142,23 @@ def test_a_folder_gives_the_newest_patch_and_the_console_launcher_first(machine)
         "Godot_v4.7-stable_win64.exe",
     ]
     # The release kit.json pins goes ahead of a newer patch.
-    pinned = [path.name for path in godot_binary.folder_candidates(folder, "4.7", "4.7.2")]
-    assert pinned[:2] == [
+    found = godot_binary.folder_candidates(folder, "4.7", "4.7.2", WINDOWS)
+    assert [path.name for path in found][:2] == [
         "Godot_v4.7.2-stable_win64_console.exe",
         "Godot_v4.7.10-stable_win64_console.exe",
     ]
-    assert godot_binary.folder_candidates(folder, "4.6") == [
+    assert godot_binary.folder_candidates(folder, "4.6", build=WINDOWS) == [
         folder / "Godot_v4.6.3-stable_win64.exe"
     ]
     later = plant(folder / "Godot_v4.10.1-stable_win64.exe")
-    assert godot_binary.folder_candidates(folder, "4.10") == [later]
-    assert godot_binary.folder_candidates(folder, "4.1") == []  # 4.10 is not a patch of 4.1
+    assert godot_binary.folder_candidates(folder, "4.10", build=WINDOWS) == [later]
+    # 4.10 is not a patch of 4.1
+    assert godot_binary.folder_candidates(folder, "4.1", build=WINDOWS) == []
+    # With no build named it is this machine's.
+    assert godot_binary.folder_candidates(folder, "4.7") == godot_binary.folder_candidates(
+        folder, "4.7", build=kit_config.godot_build()
+    )
+    assert godot_binary.folder_candidates(folder, "4.7", build="") == []
 
 
 def test_a_release_named_folder_is_searched_one_level_down(machine) -> None:
@@ -190,15 +211,120 @@ def test_a_windowed_binary_gives_way_to_the_console_launcher_beside_it(
     assert godot_binary.console_twin(alone) == alone
 
 
-@pytest.mark.skipif(os.name != "nt", reason="the Windows release names")
 def test_on_windows_only_the_64_bit_release_is_a_candidate(machine) -> None:
     root, plant = machine
     folder = root / ".tools" / "godot"
-    for name in ("Godot_v4.7.2-stable_win32.exe", "Godot_v4.7.2-stable_windows_arm64.exe"):
+    for name in (
+        "Godot_v4.7.2-stable_win32.exe",
+        "Godot_v4.7.2-stable_windows_arm64.exe",
+        "Godot_v4.7.2-stable_linux.x86_64",
+    ):
         plant(folder / name)
-    assert godot_binary.folder_candidates(folder, "4.7") == []
+    assert godot_binary.folder_candidates(folder, "4.7", build=WINDOWS) == []
     wanted = plant(folder / "Godot_v4.7.2-stable_win64.exe")
-    assert godot_binary.folder_candidates(folder, "4.7") == [wanted]
+    assert godot_binary.folder_candidates(folder, "4.7", build=WINDOWS) == [wanted]
+
+
+@pytest.mark.parametrize("build", [LINUX, "linux_arm64"])
+def test_on_linux_the_release_is_one_file_named_like_it(machine, build: str) -> None:
+    root, plant = machine
+    folder = root / ".tools" / "godot"
+    tag = godot_binary.RELEASE_TAGS[build]
+    other = "linux.arm64" if build == LINUX else "linux.x86_64"
+    inner = plant(folder / f"Godot_v4.7.2-stable_{tag}" / f"Godot_v4.7.2-stable_{tag}")
+    plant(folder / f"Godot_v4.7.2-stable_{tag}" / "notes.txt")
+    plant(folder / f"Godot_v4.7.2-stable_{tag}.zip")  # the archive is not the program
+    flat = plant(folder / f"Godot_v4.7.10-stable_{tag}")
+    plant(folder / f"Godot_v4.7.3-stable_mono_{tag.replace('.', '_')}" / "Godot.x86_64")
+    plant(folder / f"Godot_v4.7.4-stable_{other}")  # another processor's download
+    plant(folder / "Godot_v4.7.5-stable_win64.exe")  # another system's
+    plant(folder / f"Godot_v4.6.3-stable_{tag}")
+    assert godot_binary.folder_candidates(folder, "4.7", build=build) == [flat, inner]
+    assert godot_binary.folder_candidates(folder, "4.7", "4.7.2", build) == [inner, flat]
+    processor = build.removeprefix("linux_")
+    env = {"PATH": ""}
+    found = godot_binary.resolve(_config(root), env, platform="linux", architecture=processor)
+    assert Path(found) == inner
+    # A Linux program has no console twin and no .exe.
+    assert godot_binary.console_twin(inner) == inner
+    on_path = plant(root.parent / "bin" / "godot")
+    plant(root.parent / "bin" / "godot.exe", OLDER)
+    shutil.rmtree(folder)
+    assert _resolve(root, {"PATH": str(on_path.parent)}, platform="linux") == on_path
+
+
+def test_on_macos_the_release_is_godot_app(machine, tmp_path: Path) -> None:
+    root, plant = machine
+    folder = root / ".tools" / "godot"
+    pinned = plant(folder.joinpath("Godot_v4.7.2-stable_macos.universal", *BUNDLE_PROGRAM))
+    newer = plant(folder.joinpath("Godot_v4.7.10-stable_macos.universal", *BUNDLE_PROGRAM))
+    bare = plant(folder.joinpath(*BUNDLE_PROGRAM))
+    plant(folder / "Godot_v4.7.3-stable_mono_macos.universal" / "Godot_mono.app" / "x")
+    plant(folder / "Godot_v4.7.4-stable_macos.universal" / "readme.txt")  # no app inside
+    plant(folder / "Godot_v4.7.5-stable_linux.x86_64")
+    plant(folder.joinpath("Other.app", *BUNDLE_PROGRAM[1:]))
+    assert godot_binary.folder_candidates(folder, "4.7", build=MACOS) == [newer, pinned, bare]
+    assert godot_binary.folder_candidates(folder, "4.7", "4.7.2", MACOS) == [pinned, newer, bare]
+    assert _resolve(root, platform="macos") == pinned
+    # GODOT_BIN may name the app: the program is inside it. Only on macOS.
+    app = bare.parents[2]
+    assert godot_binary.bundle_program(app, "macos") == bare
+    assert godot_binary.bundle_program(bare, "macos") == bare
+    assert godot_binary.bundle_program(app, "linux") == app
+    assert godot_binary.bundle_program(app, "windows") == app
+    assert _resolve(root, {"GODOT_BIN": str(app)}, platform="macos") == bare
+    assert _resolve(root, {"GODOT4_EXE": str(bare)}, platform="macos") == bare
+    with pytest.raises(godot_binary.GodotNotFoundError, match="GODOT_BIN does not name"):
+        _resolve(root, {"GODOT_BIN": str(app)}, platform="linux")
+    empty = tmp_path / "Empty.app"
+    empty.mkdir()
+    with pytest.raises(godot_binary.GodotNotFoundError, match="GODOT_BIN does not name") as said:
+        _resolve(root, {"GODOT_BIN": str(empty)}, platform="macos")
+    assert f"'{empty}'" in str(said.value)  # what was named, not what was looked for
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Linux and macOS only: the executable permission")
+def test_a_file_nobody_may_execute_is_refused_with_the_fix(machine, tmp_path: Path) -> None:
+    root, plant = machine
+    locked = plant(root / ".tools" / "godot" / "Godot_v4.7.2-stable_linux.x86_64")
+    locked.chmod(0o644)
+    assert not godot_binary.is_executable(locked)
+    fix = f"'{locked}' is not executable. Fix: chmod +x '{locked}'"
+    assert godot_binary.incompatible(locked, "4.7") == fix
+    with pytest.raises(godot_binary.GodotNotFoundError, match="GODOT_BIN: .*is not executable"):
+        _resolve(root, {"GODOT_BIN": str(locked)}, platform="linux")
+    with pytest.raises(godot_binary.GodotNotFoundError) as said:
+        _resolve(root, platform="linux")
+    assert f"Skipped: {fix}" in str(said.value)
+    locked.chmod(0o755)
+    assert _resolve(root, platform="linux") == locked
+    assert not godot_binary.is_executable(tmp_path / "missing")
+
+
+def test_nothing_found_names_what_to_do_on_each_system() -> None:
+    install = (
+        "Godot 4.7 (standard build) not found. Install it with 'pwsh ./tools/install_godot.ps1'"
+    )
+    executable = ", or set GODOT_BIN to a Godot 4.7 executable"
+    said = {
+        system: godot_binary.not_found_message("4.7", "4.7.2", *system)
+        for system in (
+            ("windows", "x86_64"),
+            ("linux", "x86_64"),
+            ("linux", "arm64"),
+            ("macos", "arm64"),
+            ("linux", "riscv64"),
+        )
+    }
+    assert said["windows", "x86_64"] == f"{install}{executable}."
+    assert said["linux", "x86_64"] == f"{install}{executable} (Godot_v4.7.2-stable_linux.x86_64)."
+    assert said["linux", "arm64"] == f"{install}{executable} (Godot_v4.7.2-stable_linux.arm64)."
+    app = "(Godot.app, or Godot.app/Contents/MacOS/Godot)"
+    assert said["macos", "arm64"] == f"{install}{executable} {app}."
+    assert said["linux", "riscv64"] == (
+        "Godot 4.7 (standard build) not found, and Godot publishes no build for linux riscv64. "
+        "Build or install Godot 4.7 yourself and set GODOT_BIN to its executable."
+    )
 
 
 def test_godot_version_overrides_kit_json(machine) -> None:
@@ -233,9 +359,18 @@ def test_search_roots_may_be_relative_or_use_environment_variables(
     inside = plant(root / "engines" / "Godot_v4.7.2-stable_win64.exe")
     assert _resolve(root, search_roots=["engines"]) == inside
     monkeypatch.setenv("KIT_TEST_ENGINES", str(tmp_path / "shared"))
+    monkeypatch.delenv("KIT_TEST_UNSET", raising=False)
     shared = plant(tmp_path / "shared" / "godot" / "Godot_v4.7.2-stable_win64.exe")
-    variable = "%KIT_TEST_ENGINES%/godot" if os.name == "nt" else "$KIT_TEST_ENGINES/godot"
-    assert _resolve(root, search_roots=[variable, "engines"]) == shared
+    # Each spelling of a variable, on every system.
+    for variable in ("%KIT_TEST_ENGINES%", "$KIT_TEST_ENGINES", "${KIT_TEST_ENGINES}"):
+        assert _resolve(root, search_roots=[f"{variable}/godot", "engines"]) == shared
+    assert godot_binary.expand_search_root("%KIT_TEST_UNSET%/a") == "%KIT_TEST_UNSET%/a"
+    assert godot_binary.expand_search_root("$KIT_TEST_UNSET/a") == "$KIT_TEST_UNSET/a"
+    home = str(Path.home())
+    assert godot_binary.expand_search_root("~") == home
+    assert godot_binary.expand_search_root("~/godot") == home + "/godot"
+    assert godot_binary.expand_search_root("~godot") == "~godot"
+    assert godot_binary.expand_search_root("a/~") == "a/~"
 
 
 @pytest.mark.parametrize("argument", ["--help", "--bogus", "x"])
@@ -353,6 +488,27 @@ def test_two_runs_in_one_checkout_import_one_at_a_time(tmp_path: Path, monkeypat
     other = _scripts(tmp_path / "other", {"a.gd": "class_name A\n"})
     with class_cache.import_lock(config), class_cache.import_lock(other):
         pass
+
+
+@_gate_fixtures.posix_only(
+    "permission bits, which decide whether another user's run can add a slot"
+)
+def test_an_import_that_comes_first_leaves_the_slot_folder_open_to_every_user(
+    tmp_path: Path,
+) -> None:
+    """The import's lock is the first thing a run makes in a slot folder that is not there
+    yet. Made with the user's umask, the folder would take no other user's lock file."""
+    config = _scripts(tmp_path, {"scripts/grid.gd": "class_name Grid\n"})
+    private = os.umask(0o077)
+    try:
+        with class_cache.import_lock(config):
+            pass
+    finally:
+        os.umask(private)
+    locks = tmp_path / "locks"
+    [folder] = locks.iterdir()
+    assert folder.name.startswith("import_")
+    assert [path.stat().st_mode & 0o7777 for path in (locks, folder)] == [0o1777, 0o1777]
 
 
 def test_refresh_imports_and_repeats_once_after_a_noisy_first_pass(

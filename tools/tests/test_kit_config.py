@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -12,6 +13,8 @@ import pytest
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
 import kit_config  # noqa: E402
+
+SHA512 = re.compile(r"[0-9a-f]{128}")
 
 
 def _project(root: Path, files: list[str], kit: dict | None = None) -> kit_config.KitConfig:
@@ -35,12 +38,71 @@ def test_the_kit_reads_its_own_kit_json() -> None:
     assert config.godot_minor == ".".join(config.godot_version.split(".")[:2])
     assert config.test_dir == config.root / config.test_root
     assert config.gdunit4_version and len(config.gdunit4_sha256) == 64
-    assert len(config.godot_windows_sha512) == 128
+    # One checksum for every official download, each its own.
+    assert tuple(config.godot_sha512) == kit_config.GODOT_BUILDS
+    checksums = list(config.godot_sha512.values())
+    assert all(SHA512.fullmatch(checksum) for checksum in checksums), checksums
+    assert len(set(checksums)) == len(kit_config.GODOT_BUILDS)
+
+
+def test_every_download_has_its_own_checksum_key(tmp_path: Path) -> None:
+    kit = {"godot": {"linux_x86_64_sha512": "ab" * 64, "macos_universal_sha512": None}}
+    config = _project(tmp_path, [], kit)
+    assert dict(config.godot_sha512) == {
+        "windows_x86_64": "",
+        "linux_x86_64": "ab" * 64,
+        "linux_arm64": "",
+        "macos_universal": "",
+    }
+    with pytest.raises(TypeError):
+        config.godot_sha512["linux_arm64"] = "cd" * 64  # read-only, as the config is
+    # Still a value: equal to another load of the same file, and usable as a key.
+    assert config == kit_config.load(tmp_path) and len({config, kit_config.load(tmp_path)}) == 1
+    other = _project(tmp_path, [], {"godot": {"linux_x86_64_sha512": "cd" * 64}})
+    assert config != other
+    for build in kit_config.GODOT_BUILDS:
+        (tmp_path / "kit.json").write_text(json.dumps({"godot": {f"{build}_sha512": 5}}))
+        with pytest.raises(kit_config.ConfigError) as caught:
+            kit_config.load(tmp_path)
+        assert str(caught.value) == f'kit.json: "godot.{build}_sha512" must be a string'
+
+
+@pytest.mark.parametrize(
+    ("platform", "architecture", "build"),
+    [
+        ("windows", "x86_64", "windows_x86_64"),
+        ("windows", "arm64", "windows_x86_64"),  # the 64-bit x86 build runs there too
+        ("linux", "x86_64", "linux_x86_64"),
+        ("linux", "arm64", "linux_arm64"),
+        ("linux", "riscv64", ""),  # Godot publishes none
+        ("linux", "x86", ""),
+        ("macos", "arm64", "macos_universal"),
+        ("macos", "x86_64", "macos_universal"),
+        ("freebsd", "x86_64", ""),
+    ],
+)
+def test_the_download_for_a_system(platform: str, architecture: str, build: str) -> None:
+    assert kit_config.godot_build(platform, architecture) == build
+
+
+def test_this_machine_is_named_like_the_downloads(monkeypatch) -> None:
+    assert kit_config.host_platform() in ("windows", "linux", "macos")
+    assert kit_config.godot_build() == kit_config.godot_build(
+        kit_config.host_platform(), kit_config.host_architecture()
+    )
+    for platform, named in (("win32", "windows"), ("darwin", "macos"), ("linux", "linux")):
+        monkeypatch.setattr(sys, "platform", platform)
+        assert kit_config.host_platform() == named
+    machines = {"AMD64": "x86_64", "x86_64": "x86_64", "arm64": "arm64", "aarch64": "arm64"}
+    for machine, named in (machines | {"riscv64": "riscv64"}).items():
+        monkeypatch.setattr(kit_config._platform, "machine", lambda machine=machine: machine)
+        assert kit_config.host_architecture() == named
 
 
 def test_a_missing_kit_json_gives_the_defaults(tmp_path: Path) -> None:
     config = kit_config.load(tmp_path)
     assert config.root == tmp_path.resolve()
+    assert dict(config.godot_sha512) == dict.fromkeys(kit_config.GODOT_BUILDS, "")
     assert config.source_exclude == ("addons", "artifacts", "docs")
     assert config.source_include == ()
     assert config.test_root == "test"
@@ -303,6 +365,25 @@ def test_an_explicit_folder_keeps_the_excludes_inside_it(tmp_path: Path) -> None
     more = _project(tmp_path, ["game/vendor2/h.gd"], kit)
     assert _found(more, path="game/vendor2") == ["game/vendor2/h.gd"]
     assert "game/vendor2/h.gd" in _found(more, path="game")
+
+
+def test_a_relative_path_takes_either_slash_on_every_system(tmp_path: Path) -> None:
+    """A command line and a kit.json travel between systems, and tools/kit_config.ps1
+    reads `addons\\x` as `addons/x` everywhere: so do the Python tools."""
+    config = _project(tmp_path, ["addons/x/a.gd", "src/d.gd"])
+    for spelled in ("addons/x", "addons\\x", "addons\\x\\", "./addons/x", ".\\addons\\x"):
+        assert _found(config, path=spelled) == ["addons/x/a.gd"], spelled
+    assert _found(config, path="addons\\x\\a.gd") == ["addons/x/a.gd"]
+    root = config.root
+    assert kit_config.project_path("addons\\x/a.gd", root) == root / "addons" / "x" / "a.gd"
+    # An absolute path is this system's own: nothing in it is rewritten.
+    absolute = root / "src" / "d.gd"
+    assert kit_config.project_path(absolute, root) == absolute
+    assert kit_config.project_path(str(absolute), root) == absolute
+    with pytest.raises(ValueError, match="does not exist"):
+        kit_config.source_files(path="addons\\missing", config=config)
+    with pytest.raises(ValueError, match="outside the project"):
+        kit_config.source_files(path="..\\", config=config)
 
 
 def test_an_explicit_file_with_another_suffix_is_not_returned(tmp_path: Path) -> None:

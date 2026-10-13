@@ -22,6 +22,11 @@ extends RefCounted
 const CONFIG_NAME: String = "kit.json"
 const ROOT: String = "res://"
 const DEFAULT_GODOT_VERSION: String = "4.7.2"
+# The official Godot downloads the kit knows: kit.json pins one checksum for
+# each, as godot.<build>_sha512.
+const GODOT_BUILDS: PackedStringArray = [
+	"windows_x86_64", "linux_x86_64", "linux_arm64", "macos_universal"
+]
 const DEFAULT_EXCLUDE: PackedStringArray = ["addons", "artifacts", "docs"]
 const DEFAULT_TEST_ROOT: String = "test"
 const BYTE_ORDER_MARK: PackedByteArray = [0xEF, 0xBB, 0xBF]
@@ -122,15 +127,18 @@ static func project_folder(text: String) -> String:
 
 
 ## kit.json under `root` as a Dictionary: "error" (one line, "" when the file is
-## fine or absent) and the values godot_version, godot_minor,
-## godot_windows_sha512, godot_search_roots, gdunit4_version, gdunit4_sha256,
-## source_exclude, source_include, test_root, gdscript_strict. With an error the
-## values are not to be used.
+## fine or absent) and the values godot_version, godot_minor, godot_sha512 (one
+## entry for each of GODOT_BUILDS), godot_search_roots, gdunit4_version,
+## gdunit4_sha256, source_exclude, source_include, test_root, gdscript_strict.
+## With an error the values are not to be used.
 static func read(root: String = ROOT) -> Dictionary:
+	var checksums: Dictionary[String, String] = {}
+	for build: String in GODOT_BUILDS:
+		checksums[build] = ""
 	var config: Dictionary = {
 		"error": "",
 		"godot_version": DEFAULT_GODOT_VERSION,
-		"godot_windows_sha512": "",
+		"godot_sha512": checksums,
 		"godot_search_roots": PackedStringArray(),
 		"gdunit4_version": "",
 		"gdunit4_sha256": "",
@@ -268,7 +276,9 @@ static func _fill(
 	if not problems.is_empty():
 		return
 	config["godot_version"] = _text(godot, "godot", "version", DEFAULT_GODOT_VERSION, problems)
-	config["godot_windows_sha512"] = _text(godot, "godot", "windows_x86_64_sha512", "", problems)
+	var checksums: Dictionary[String, String] = config["godot_sha512"]
+	for build: String in GODOT_BUILDS:
+		checksums[build] = _text(godot, "godot", build + "_sha512", "", problems)
 	config["godot_search_roots"] = _texts(
 		godot, "godot", "search_roots", PackedStringArray(), problems
 	)

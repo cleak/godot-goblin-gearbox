@@ -18,8 +18,17 @@ Before forwarding (unless --import is already an engine argument) the project
 is re-imported when the class cache is stale (tools/class_cache.ps1), and the
 output folder of an export is created (tools/export_paths.ps1).
 
+Linux: a run that opens a window needs a display. Without DISPLAY and
+WAYLAND_DISPLAY (an ssh session, a CI runner) the wrapper says so in one line
+and starts nothing: add --headless, or run it under xvfb-run.
+
+A project without a main scene (application/run/main_scene) has no game to
+run: the wrapper says so in one line and starts nothing. Godot itself would
+say it in a dialog and wait for a click, with --headless too.
+
 Exit code: Godot's. 1 when Godot could not be started at all (not found, no
-project.godot, a failed import); the reason is printed.
+project.godot, no display, no main scene, a failed import); the reason is
+printed.
 #>
 #Requires -Version 7.0
 
@@ -63,6 +72,13 @@ foreach ($argument in $args) {
     }
 }
 
+# Before anything is started: without a main scene the game ends in a dialog that
+# waits for a click, and without a display in a page of display driver errors.
+$sceneProblem = Get-KitMainSceneProblem -GodotArgs $godotArgs -ProjectRoot $projectRoot
+if ($sceneProblem) { Stop-Wrapper $sceneProblem }
+$displayProblem = Get-KitDisplayProblem -GodotArgs $godotArgs
+if ($displayProblem) { Stop-Wrapper $displayProblem }
+
 # A pull that adds or moves a class_name script leaves the gitignored class
 # cache stale and every script naming that class fails to parse. Re-import first.
 . (Join-Path $PSScriptRoot "class_cache.ps1")
@@ -78,12 +94,16 @@ if (-not (Test-GodotImportArg -GodotArgs $godotArgs) -and
 . (Join-Path $PSScriptRoot "export_paths.ps1")
 Initialize-GodotExportDirectory -ProjectRoot $projectRoot -GodotArgs $godotArgs
 
-# The call operator neither waits for a GUI-subsystem program nor reports its
-# exit code, and that is what the plain Godot .exe is (the resolver hands it
-# over only when no _console.exe sits beside it). It is started and waited for
-# explicitly; anything else runs through the call operator, which keeps its
-# output on PowerShell's pipeline.
-if (Test-KitGuiSubsystem $godot) {
+# Started and waited for explicitly where the call operator cannot be trusted:
+# - Windows: it neither waits for a GUI-subsystem program nor reports its exit
+#   code, and that is what the plain Godot .exe is (the resolver hands it over
+#   only when no _console.exe sits beside it).
+# - PowerShell before 7.3, for an argument it would change: it hands a program
+#   its arguments unescaped, so a double quote inside one is lost and an empty
+#   one is dropped.
+# Anything else runs through the call operator, which keeps its output on
+# PowerShell's pipeline: `$said = & ./tools/godot.ps1 --version` in a session.
+if ((Test-KitGuiSubsystem $godot) -or (Test-KitArgumentLoss -Arguments $godotArgs)) {
     exit (Invoke-KitAttachedProcess -FilePath $godot -Arguments $godotArgs -WorkingDirectory $projectRoot)
 }
 

@@ -2,6 +2,9 @@
 
 There `print("日本語")` raises UnicodeEncodeError unless the tool made its streams safe
 (tools/ci/gate_support.py `plain_output`). Not a test module: imported by the tests.
+
+A model of that pipe, so the tests that use it run on every system. The pipe itself,
+on Windows and in the locales of Linux and macOS, is in test_cli_output.py.
 """
 
 from __future__ import annotations

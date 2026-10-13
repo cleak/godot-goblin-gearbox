@@ -8,12 +8,18 @@
 #   pwsh ./tools/test.ps1 -TimeoutSeconds 900
 #
 # -Test takes a res:// path, a project-relative path or an absolute one inside
-# the project. The default test root is kit.json tests.root ("test"). Reports go to
+# the project (spelled through a directory link to the project too). The default
+# test root is kit.json tests.root ("test"). Reports go to
 # artifacts/gdunit-reports (gitignored, hidden from Godot by artifacts/.gdignore).
 #
 # Every test case runs, as with tools/test_shards.py: one failure does not hide
 # the next. -FailFast gives gdUnit4's own default back (it stops at the first).
-# The run gets an empty user:// of its own (a temp folder, removed afterwards).
+# The run gets an empty user:// of its own (a temp folder, removed afterwards):
+# Godot alone is started with the variable that moves it, APPDATA on Windows,
+# XDG_DATA_HOME on Linux, HOME on macOS (Get-KitUserDataEnvironment).
+# Not so the import that comes first when the class cache is stale: it is an
+# editor run and needs your editor settings (the path to Blender, for one), so
+# it uses your own Godot folders, as opening the editor does.
 #
 # Exit codes:
 #   0   = all tests passed
@@ -55,6 +61,11 @@ $localTest = if ([System.IO.Path]::IsPathRooted($given)) {
     [System.IO.Path]::GetFullPath((Join-Path $projectRoot $given))
 }
 if (-not (Test-KitPathInProject $localTest)) {
+    # The project reached by another spelling: through a directory link, or its
+    # real path when this script was started through one.
+    $localTest = ConvertTo-KitProjectPath $localTest
+}
+if (-not $localTest) {
     Write-Host "Tests: $source '$Test' is not a path inside the project." -ForegroundColor Red
     exit 1
 }
@@ -122,17 +133,18 @@ if ($FailFast) {
 
 # A user:// of its own for the run, as tools/test_shards.py gives each shard: a
 # test that writes a save must not read or replace the ones you play with.
-$userData = Join-Path ([System.IO.Path]::GetTempPath()) ("godot_test_user_" + [guid]::NewGuid().ToString("N"))
+# GetFullPath: the temp folder may be named by a relative path (TMPDIR=tmp), and
+# Godot ignores a relative XDG_DATA_HOME.
+$userData = [System.IO.Path]::GetFullPath(
+    (Join-Path ([System.IO.Path]::GetTempPath()) ("godot_test_user_" + [guid]::NewGuid().ToString("N"))))
 [System.IO.Directory]::CreateDirectory($userData) | Out-Null
-$appDataBefore = $env:APPDATA
-$env:APPDATA = $userData
 try {
     # Below-normal priority (children inherit it): a long run must not starve the
     # editor, a running game or other agents on this machine.
     $result = Invoke-KitProcess -FilePath $godot -Arguments $gdunitArgs `
-        -WorkingDirectory $projectRoot -TimeoutSeconds $TimeoutSeconds -BelowNormal
+        -WorkingDirectory $projectRoot -TimeoutSeconds $TimeoutSeconds -BelowNormal `
+        -Environment (Get-KitUserDataEnvironment -Folder $userData)
 } finally {
-    $env:APPDATA = $appDataBefore
     Remove-Item -LiteralPath $userData -Recurse -Force -ErrorAction SilentlyContinue
 }
 

@@ -9,8 +9,8 @@ function Initialize-GodotExportDirectory {
     param([string]$ProjectRoot, [string[]]$GodotArgs)
 
     for ($exportIndex = 0; $exportIndex -lt $GodotArgs.Count; $exportIndex++) {
-        if ($GodotArgs[$exportIndex] -eq "--") { break }
-        if ($GodotArgs[$exportIndex] -notin @("--export-release", "--export-debug", "--export-pack")) {
+        if ($GodotArgs[$exportIndex] -ceq "--") { break }
+        if ($GodotArgs[$exportIndex] -cnotin @("--export-release", "--export-debug", "--export-pack")) {
             continue
         }
         if ($exportIndex + 1 -ge $GodotArgs.Count) { return }
@@ -26,7 +26,8 @@ function Initialize-GodotExportDirectory {
             foreach ($line in [System.IO.File]::ReadAllLines($presetsFile)) {
                 if ($line -match '^\[') { $selectedName = "" }
                 if ($line -match '^name="(.*)"$') { $selectedName = $Matches[1] }
-                if ($selectedName -eq $presetName -and $line -match '^export_path="(.*)"$') {
+                # -ceq: Godot tells the preset "Web" from the preset "web".
+                if ($selectedName -ceq $presetName -and $line -match '^export_path="(.*)"$') {
                     $outputPath = $Matches[1]
                     break
                 }

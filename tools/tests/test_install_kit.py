@@ -7,21 +7,41 @@ without one.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from _gate_fixtures import PWSH, REPO, STRICT_WARNINGS, WINDOWS, clean_env, real_godot, run_tool
+from _gate_fixtures import (
+    NEEDS_PWSH,
+    PWSH,
+    REPO,
+    STRICT_WARNINGS,
+    WINDOWS,
+    clean_env,
+    not_as_root,
+    old_powershell,
+    posix_only,
+    real_godot,
+    run_tool,
+    takes_no_new_file,
+    user_data_env,
+    venv_tool,
+    windows_only,
+)
 
-pytestmark = pytest.mark.skipif(not WINDOWS or PWSH is None, reason="Windows PowerShell 7")
+pytestmark = NEEDS_PWSH
 
 NOT_COPIED = {".git", ".godot", ".venv", ".tools", "artifacts", ".pytest_cache", ".ruff_cache"}
 SEEDS = (
@@ -40,6 +60,7 @@ SEEDS = (
 )
 PROJECT_DATA = "tools/ci/architecture_modules.json"
 HOOKS = ".pre-commit-config.yaml"
+LITTER = (".DS_Store", "Thumbs.db", "desktop.ini")
 
 # The description holds a line that looks like a section header: it is inside a string.
 PROJECT = """; Engine configuration file.
@@ -121,19 +142,41 @@ def target(tmp_path: Path) -> Path:
     return _target(tmp_path / "it's a [wip] game")
 
 
-def _install(kit: Path, target: Path | str, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run <kit>/install.ps1 from a folder that is neither the kit nor the target."""
+def _install(
+    kit: Path, target: Path | str, *args: str, limit: int | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run <kit>/install.ps1 from a folder that is neither the kit nor the target.
+
+    `limit` (Linux, macOS): no file the run writes grows past that many bytes. The write
+    that would is cut there and fails, as every write does on a full disk.
+    """
+    env = clean_env()
+    before_start = None
+    if limit is not None:
+        import resource
+        import signal
+
+        def cap_file_size() -> None:
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)  # the write fails; the run goes on
+            resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+        before_start = cap_file_size
+        # .NET maps its own code through a file larger than any limit: not under one.
+        env["DOTNET_EnableWriteXorExecute"] = "0"
+        # PowerShell's own caches are files too: the limit must not cut the developer's.
+        env["XDG_CACHE_HOME"] = str(kit.parent / "caches of the limited run")
     return subprocess.run(
         [PWSH, "-NoProfile", "-NonInteractive", "-File", str(kit / "install.ps1")]
         + ["-Target", str(target), *args],
         cwd=kit.parent,
-        env=clean_env(),
+        env=env,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
         timeout=180,
         check=False,
+        preexec_fn=before_start,
     )
 
 
@@ -167,6 +210,67 @@ def _stamps(root: Path) -> dict[str, int]:
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+@contextlib.contextmanager
+def _unreadable(path: Path) -> Iterator[None]:
+    """No other process can read `path` meanwhile: locked on Windows, no permission elsewhere."""
+    if WINDOWS:
+        import msvcrt
+
+        with path.open("rb") as held:
+            msvcrt.locking(held.fileno(), msvcrt.LK_NBLCK, 1)
+            try:
+                yield
+            finally:
+                msvcrt.locking(held.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    mode = stat.S_IMODE(path.stat().st_mode)
+    path.chmod(0)
+    try:
+        yield
+    finally:
+        path.chmod(mode)
+
+
+@contextlib.contextmanager
+def _read_only(*paths: Path) -> Iterator[None]:
+    """The read-only mark on Windows, no write permission elsewhere."""
+    modes = [stat.S_IMODE(path.stat().st_mode) for path in paths]
+    for path in paths:
+        path.chmod(stat.S_IREAD)
+    try:
+        yield
+    finally:
+        for path, mode in zip(paths, modes, strict=True):
+            path.chmod(mode)
+
+
+def _folder_link(link: Path, to: Path) -> None:
+    """A link to a folder: a junction on Windows, where a symbolic link needs a privilege."""
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if WINDOWS:
+        import _winapi
+
+        _winapi.CreateJunction(str(to), str(link))
+    else:
+        link.symlink_to(to, target_is_directory=True)
+
+
+# Why a test of letter case is skipped: the file system decides, not the system's name.
+APART = "needs a file system that keeps Tools and tools apart (Linux)"
+AS_ONE = "needs a file system that takes Tools for tools (Windows, macOS)"
+
+
+def _keeps_letter_case_apart(folder: Path) -> bool:
+    """True when `Tools` and `tools` are two names in `folder` (Linux; not Windows, and
+    not macOS as it is installed)."""
+    probe = folder / "Letter Case Probe"
+    probe.mkdir()
+    try:
+        return not (folder / "letter case probe").exists()
+    finally:
+        probe.rmdir()
 
 
 def _kit_files(kit: Path) -> set[str]:
@@ -246,7 +350,16 @@ def _without_kit_entries(text: str, record: list[str]) -> str:
 
 def test_blank_project_gets_the_kit(kit: Path, target: Path) -> None:
     assert (kit / "tools" / "tests").is_dir() and (kit / PROJECT_DATA).is_file()
+    # What a file manager left in the kit's folders is not the kit's.
+    litter = [
+        f"{folder}/{name}" for folder in ("tools/ci", "docs", "addons/gdUnit4") for name in LITTER
+    ]
+    for relative in litter:
+        _write(kit / relative, "left by a file manager\n")
     out = _installed(kit, target)
+    assert not [path.name for path in target.rglob("*") if path.name in LITTER]
+    for relative in litter:
+        (kit / relative).unlink()
 
     # The kit's files, byte for byte, .uid sidecars included; not its tests or project data.
     owned = _kit_files(kit)
@@ -630,10 +743,14 @@ def test_a_manifest_entry_removes_nothing_the_kit_does_not_install(kit: Path, ta
     }
     for relative, text in mine.items():
         _write(target / relative, text)
+    # The kit's tests folder under another spelling: the same folder to Windows, a second
+    # folder where letter case counts. Never removed there either.
+    if _keeps_letter_case_apart(target):
+        mine["tools/Tests/test_mine.py"] = mine["tools/tests/test_mine.py"]
+        _write(target / "tools/Tests/test_mine.py", mine["tools/Tests/test_mine.py"])
     _installed(kit, target)
     manifest = _manifest(target)
     for relative in mine:
-        # The kit's tests folder under another spelling: the same folder to Windows.
         listed = relative.replace("tools/tests/", "tools/Tests/")
         manifest["files"][listed] = _lf_sha256(target / relative)
     assert "tools/Tests/test_mine.py" in manifest["files"]
@@ -673,17 +790,15 @@ def test_a_manifest_that_is_not_one_is_refused(
 def test_a_gdunit4_copy_that_stops_halfway_is_finished_by_the_next_run(
     kit: Path, target: Path
 ) -> None:
-    import msvcrt
-
+    not_as_root()
     # plugin.cfg is copied before src/: a folder cut short still names the pinned version.
     last = _write(kit / "addons" / "gdUnit4" / "src" / "zz_last.gd", "extends RefCounted\n")
-    with last.open("rb") as held:
-        msvcrt.locking(held.fileno(), msvcrt.LK_NBLCK, 1)  # another process cannot read it
-        try:
-            out = _refused(kit, target)
-        finally:
-            msvcrt.locking(held.fileno(), msvcrt.LK_UNLCK, 1)
+    with _unreadable(last):
+        out = _refused(kit, target)
     assert "install: stopped halfway. Fix that, then run the same command again." in out
+    # One line that names the file, on every system, then the one that says what to do.
+    said = [line for line in out.splitlines() if line.startswith("install: ")]
+    assert len(said) == 2 and "zz_last.gd" in said[0], out
     assert not (target / "addons" / "gdUnit4").exists()  # never a folder that is half there
     # The manifest already says what the run set out to write; no file is the kit's yet.
     manifest = _manifest(target)
@@ -739,14 +854,15 @@ def test_a_run_that_stops_halfway_loses_no_record(kit: Path, target: Path) -> No
         "gitignore": ["/artifacts/", "/.tools/", ".venv/", "__pycache__/"],
     }
 
-    # A first install that cannot write .gitignore: its last step but the manifest.
-    ignore.chmod(stat.S_IREAD)
-    try:
+    # A first install that cannot write the starter test: kit and starter files and kit.json
+    # are written by then; project.godot and .gitignore are not.
+    not_as_root()
+    (target / "test").mkdir()
+    with takes_no_new_file(target / "test"):
         out = _refused(kit, target)
-    finally:
-        ignore.chmod(stat.S_IWRITE | stat.S_IREAD)
     assert "install: stopped halfway. Fix that, then run the same command again." in out
-    assert (target / "kit.json").is_file() and "DevTools=" in _read(project)
+    assert (target / "kit.json").is_file() and (target / "CLAUDE.md").is_file()
+    assert "DevTools=" not in _read(project) and _read(ignore) == ".godot/\n"
     manifest = _manifest(target)
     assert manifest["wrote"] == wrote
     assert manifest["files"] == {} and manifest["seeded"] == {}
@@ -761,27 +877,29 @@ def test_a_run_that_stops_halfway_loses_no_record(kit: Path, target: Path) -> No
     assert ".python-version" not in manifest["seeded"]
     assert "Up to date" in _installed(kit, target)
 
-    # An upgrade that cannot write project.godot: kit and starter files are written by then.
+    # An upgrade that cannot write its last starter file: the kit's files and the other
+    # starter files are written by then; project.godot is not.
     tool = kit / "tools" / "check.ps1"
     tool.write_bytes(tool.read_bytes() + b"# a newer check\n")
     (kit / "CLAUDE.md").write_bytes((kit / "CLAUDE.md").read_bytes() + b"\nNewer kit text.\n")
     _write(kit / "docs" / "new_page.md", "# New in this kit\n")
+    _write(kit / "docs" / "zz" / "late.md", "# The last one written\n")
     _write(kit / ".python-version", "3.99\n")
     _write(kit / "VERSION", "9.9.9\n")
     old = manifest["files"]["tools/check.ps1"]
-    project.chmod(stat.S_IREAD)
-    try:
+    (target / "docs" / "zz").mkdir()
+    with takes_no_new_file(target / "docs" / "zz"):
         out = _refused(kit, target, "-StrictWarnings")
-    finally:
-        project.chmod(stat.S_IWRITE | stat.S_IREAD)
     assert "install: stopped halfway." in out
     assert (target / "tools" / "check.ps1").read_bytes() == tool.read_bytes()
+    assert (target / "docs" / "new_page.md").is_file()
+    assert not (target / "docs" / "zz" / "late.md").exists()
     manifest = _manifest(target)
     # Still the old kit on record, so the files not yet updated are not taken for edits.
     assert manifest["kit_version"] == _read(REPO / "VERSION").strip()
     assert manifest["files"]["tools/check.ps1"] == old
     assert "docs/new_page.md" not in manifest["seeded"]
-    assert set(manifest["unfinished"]) == {"CLAUDE.md", "docs/new_page.md"}
+    assert set(manifest["unfinished"]) == {"CLAUDE.md", "docs/new_page.md", "docs/zz/late.md"}
     strict = ["[debug] untyped_declaration 1 -> 2"]
     strict += [f"[debug] {name} added" for name in _strict_names(kit)[1:]]
     wrote["project_godot"] += strict
@@ -801,7 +919,7 @@ def test_a_run_that_stops_halfway_loses_no_record(kit: Path, target: Path) -> No
     assert manifest["kit_version"] == "9.9.10" and "unfinished" not in manifest
     assert manifest["wrote"] == wrote
     assert manifest["files"]["tools/check.ps1"] == _lf_sha256(tool)
-    for relative in ("CLAUDE.md", "docs/new_page.md"):
+    for relative in ("CLAUDE.md", "docs/new_page.md", "docs/zz/late.md"):
         assert (target / relative).read_bytes() == (kit / relative).read_bytes()
         assert manifest["seeded"][relative] == _lf_sha256(kit / relative)
     assert ".python-version" not in manifest["seeded"] and _read(mine) != "3.99\n"
@@ -809,8 +927,555 @@ def test_a_run_that_stops_halfway_loses_no_record(kit: Path, target: Path) -> No
     assert "Up to date" in _installed(kit, target, "-StrictWarnings")
 
 
+@posix_only("a limit on the size of the files of one process (RLIMIT_FSIZE)")
+@pytest.mark.parametrize(
+    "big",
+    [
+        "project.godot",  # the project's own, rewritten
+        ".gitignore",  # the project's own, added to: the last write but the manifest
+        "tools/big_table.gd",  # a new kit file
+        "docs/big.md",  # a new starter file
+        "tools/check.ps1",  # a kit file an update replaces
+        "CLAUDE.md",  # a starter file an update replaces
+    ],
+)
+def test_a_write_that_fails_part_way_leaves_every_file_whole(
+    kit: Path, target: Path, tmp_path: Path, big: str
+) -> None:
+    """A full disk cuts a file where the space ends. No file of the project is ever such a
+    file: each is whole, as it was or as the kit writes it, and the next run finishes."""
+    limit = 2 * max(path.stat().st_size for path in kit.rglob("*") if path.is_file())
+    padding = "# " + "x" * (limit + 1000) + "\n"
+    if big in ("tools/check.ps1", "CLAUDE.md"):
+        _installed(kit, target)
+    if big == "project.godot":
+        _write(target / big, _project() + f'\n[zz]\n\nnotes="{padding}"\n')
+    elif big == ".gitignore":
+        # Twenty bytes short of the limit: lines added in place would be cut in the first.
+        _write(target / big, ".godot/\n# " + "x" * (limit - 31) + "\n")
+        assert (target / big).stat().st_size == limit - 20
+    else:
+        source = kit / big
+        _write(source, (_read(source) if source.exists() else "") + padding)
+    twin = tmp_path / "twin"
+    shutil.copytree(target, twin)
+    before = _tree(target)
+
+    stopped = _install(kit, target, limit=limit)
+    out = stopped.stdout
+    assert stopped.returncode == 1 and stopped.stderr.strip() == "", out + stopped.stderr
+    assert f"install: '{big}' was not written: " in out
+    assert "install: stopped halfway. Fix that, then run the same command again." in out
+    after = _tree(target)
+    _installed(kit, twin)
+    whole = _tree(twin)
+    for name, data in after.items():
+        if name != "tools/kit_manifest.json":
+            assert name in whole, name  # no temporary file stays
+            assert data == whole[name] or (name in before and data == before[name]), name
+    assert after.get(big) == before.get(big)
+    assert "unfinished" in _manifest(target)
+    if big == ".gitignore":
+        assert b"\nDevTools=" in after["project.godot"]  # written before the run stopped
+
+    _installed(kit, target)
+    assert _tree(target) == whole
+    assert "Up to date" in _installed(kit, target)
+
+
+@posix_only("permission bits")
+def test_a_file_of_yours_that_is_rewritten_keeps_its_permissions(kit: Path, target: Path) -> None:
+    """A file written beside its place and renamed would have the permissions of a new file."""
+    project = target / "project.godot"
+    ignore = _write(target / ".gitignore", ".godot/\n")
+    project.chmod(0o640)
+    ignore.chmod(0o600)
+    _installed(kit, target)
+    assert "\nDevTools=" in _read(project) and "/artifacts/" in _read(ignore)
+    manifest = target / "tools" / "kit_manifest.json"
+    manifest.chmod(0o660)
+    tool = kit / "tools" / "check.ps1"
+    tool.write_bytes(tool.read_bytes() + b"# a newer check\n")
+    tool.chmod(0o755)
+    assert "[debug]" in _installed(kit, target, "-StrictWarnings")
+    modes = {path.name: stat.S_IMODE(path.stat().st_mode) for path in (project, ignore, manifest)}
+    assert modes == {"project.godot": 0o640, ".gitignore": 0o600, "kit_manifest.json": 0o660}
+    # A kit file has the kit's.
+    assert stat.S_IMODE((target / "tools" / "check.ps1").stat().st_mode) == 0o755
+
+
+def test_a_run_that_stops_after_project_godot_is_finished_by_the_next(
+    kit: Path, target: Path, tmp_path: Path
+) -> None:
+    project = target / "project.godot"
+    ignore = _write(target / ".gitignore", ".godot/\n")
+    twin = tmp_path / "twin"
+    shutil.copytree(target, twin)
+    # In the way of the name .gitignore is written under before it takes its own: the one
+    # write after project.godot's, on every system.
+    in_the_way = target / ".gitignore.kit-new"
+    _write(in_the_way / "mine.txt", "mine\n")
+    out = _refused(kit, target)
+    said = [line for line in out.splitlines() if line.startswith("install: ")]
+    assert len(said) == 2 and said[0].startswith("install: '.gitignore' was not written: "), out
+    assert said[1] == "install: stopped halfway. Fix that, then run the same command again."
+    assert "\nDevTools=" in _read(project) and _read(ignore) == ".godot/\n"
+    manifest = _manifest(target)
+    assert "[autoload] DevTools" in manifest["wrote"]["project_godot"]
+    assert manifest["wrote"]["gitignore"] == ["/artifacts/", "/.tools/", ".venv/", "__pycache__/"]
+    assert manifest["files"] == {} and "CLAUDE.md" in manifest["unfinished"]
+
+    shutil.rmtree(in_the_way)
+    out = _installed(kit, target)
+    assert "project.godot  no change" in out and ".gitignore     + /artifacts/" in out
+    _installed(kit, twin)
+    assert _tree(target) == _tree(twin)
+    assert "Up to date" in _installed(kit, target)
+
+
+def test_what_a_killed_run_left_is_deleted_by_the_next(kit: Path, target: Path) -> None:
+    """A run killed while it writes leaves the file it was writing under its temporary
+    name, beside the place it was for."""
+    _write(target / ".gitignore", ".godot/\n")
+    _installed(kit, target)
+    left = [
+        ".project.godot.kit-new",
+        ".gitignore.kit-new",
+        "tools/.check.ps1.kit-new",
+        "tools/ci/.suites.py.kit-new",
+        "docs/.tools.md.kit-new",
+        "test/unit/.test_kit_smoke.gd.kit-new",
+    ]
+    # Not looked for outside the folders the kit writes into, nor behind a link.
+    mine = _write(target / "levels" / ".one.tscn.kit-new", "mine\n")
+    theirs = _write(target.parent / "shared docs" / ".logo.png.kit-new", "theirs\n")
+    shutil.rmtree(target / ".github")
+    _folder_link(target / ".github", theirs.parent)
+    installed = _tree(target)
+    for relative in left:
+        _write(target / relative, "half a fi")
+    (target / left[2]).chmod(stat.S_IREAD)  # as copied from a read-only kit
+
+    out = _installed(kit, target, "-DryRun")
+    assert f"left over      {len(left)} temporary file(s) of a run that was cut short" in out
+    for relative in left:
+        assert f"- {relative}\n" in out and (target / relative).is_file(), relative
+    assert "levels" not in out and "logo" not in out
+    out = _installed(kit, target)
+    assert f"left over      {len(left)} temporary file(s)" in out and "Up to date" not in out
+    assert _tree(target) == installed
+    assert _read(mine) == "mine\n" and _read(theirs) == "theirs\n"
+    assert "Up to date" in _installed(kit, target)
+
+    # An update with one in its way writes the file whole.
+    tool = kit / "tools" / "check.ps1"
+    tool.write_bytes(tool.read_bytes() + b"# a newer check\n")
+    _write(target / "tools" / ".check.ps1.kit-new", "half a fi")
+    assert "~ tools/check.ps1" in _installed(kit, target)
+    assert (target / "tools" / "check.ps1").read_bytes() == tool.read_bytes()
+    assert not [path for path in (target / "tools").rglob("*.kit-new")]
+
+
+@windows_only("a file another program has open cannot be replaced there")
+def test_a_kit_file_a_program_has_open_is_not_changed_under_it(kit: Path, target: Path) -> None:
+    """Open for reading, as a running tool has its script: it could be written into, and
+    is not. The new file cannot take the name until the old one is closed."""
+    _installed(kit, target)
+    tool = kit / "tools" / "check.ps1"
+    old = tool.read_bytes()
+    tool.write_bytes(old + b"# a newer check\n")
+    with (target / "tools" / "check.ps1").open("rb") as held:
+        out = _refused(kit, target)
+        said = [line for line in out.splitlines() if line.startswith("install: ")]
+        assert len(said) == 2 and "'tools/check.ps1' was not written: " in said[0], out
+        assert said[1] == "install: stopped halfway. Fix that, then run the same command again."
+        assert held.read() == old
+    assert not list((target / "tools").glob(".*.kit-new"))
+    assert "~ tools/check.ps1" in _installed(kit, target)
+    assert (target / "tools" / "check.ps1").read_bytes() == tool.read_bytes()
+    assert "Up to date" in _installed(kit, target)
+
+
+def test_starter_files_a_later_kit_dropped_are_listed_in_one_order(kit: Path, target: Path) -> None:
+    """By code point, not by the language settings of the machine: two people who share a
+    project would rewrite each other's manifest."""
+    _installed(kit, target)
+    dropped = ["zeta.md", "docs/_old.md", "docs/Old2.md", "Beta.md", ".alpha.md"]
+    manifest = _manifest(target)
+    for relative in dropped:
+        _write(target / relative, "# Was a starter file\n")
+        manifest["seeded"][relative] = "0" * 64
+    _write(target / "tools" / "kit_manifest.json", json.dumps(manifest, indent=2) + "\n")
+    out = _installed(kit, target)
+    assert out.count("(no longer part of the kit; yours to keep or delete)") == len(dropped)
+    seeded = _manifest(target)["seeded"]
+    assert list(seeded)[-len(dropped) :] == [
+        ".alpha.md",
+        "Beta.md",
+        "docs/Old2.md",
+        "docs/_old.md",
+        "zeta.md",
+    ]
+    assert all(seeded[relative] == "" for relative in dropped)
+    assert "Up to date" in _installed(kit, target)
+
+
+def _one_line_refusal(kit: Path, target: Path, *args: str) -> str:
+    """Refused in one line, on a dry run too, with the project left as it was."""
+    before, stamps = _tree(target), _stamps(target)
+    for switches in (args, (*args, "-DryRun")):
+        out = _refused(kit, target, *switches)
+        assert len(out.strip().splitlines()) == 1, out
+        assert "stopped halfway" not in out
+        assert _tree(target) == before
+        assert _stamps(target) == stamps  # opened to see whether it can be written, not written
+    return out
+
+
+def test_a_file_it_cannot_write_stops_the_run_before_the_first_write(
+    kit: Path, target: Path
+) -> None:
+    not_as_root()
+    ignore = _write(target / ".gitignore", ".godot/\n")
+    with _read_only(ignore):
+        out = _one_line_refusal(kit, target)
+    assert "install: 1 file(s) in the project cannot be written (read-only" in out
+    assert "'.gitignore'. Make them writable, then run again." in out
+    _installed(kit, target)
+
+    # An upgrade: a kit file it would replace, one it would delete, a starter file, and
+    # project.godot. One it does not touch may be read-only.
+    tool = kit / "tools" / "check.ps1"
+    tool.write_bytes(tool.read_bytes() + b"# a newer check\n")
+    (kit / "tools" / "lint_shaders.gd").unlink()
+    (kit / "CLAUDE.md").write_bytes((kit / "CLAUDE.md").read_bytes() + b"\nNewer kit text.\n")
+    written = (
+        "tools/kit_manifest.json",
+        "tools/check.ps1",
+        "tools/lint_shaders.gd",
+        "CLAUDE.md",
+        "project.godot",
+    )
+    with _read_only(*(target / name for name in (*written, "tools/doctor.ps1", "player.gd"))):
+        out = _one_line_refusal(kit, target, "-StrictWarnings")
+        assert "install: 5 file(s) in the project cannot be written" in out
+        assert "doctor.ps1" not in out and "player.gd" not in out
+        for name in written:
+            assert f"'{name}'" in out, name
+    out = _installed(kit, target, "-StrictWarnings")
+    assert "~ tools/check.ps1" in out and "- tools/lint_shaders.gd" in out and "~ CLAUDE.md" in out
+
+
+def test_a_project_godot_that_cannot_be_read_is_not_called_bad_text(
+    kit: Path, target: Path
+) -> None:
+    """Open in another program, or no permission: the run gives the system's reason. It
+    said "not UTF-8 text" and to save the file again from the editor."""
+    not_as_root()
+    before = _tree(target)
+    for args in ((), ("-DryRun",)):
+        with _unreadable(target / "project.godot"):
+            out = _refused(kit, target, *args)
+        said = out.strip()
+        assert len(said.splitlines()) == 1, out
+        assert said.startswith("install: project.godot cannot be read: "), out
+        assert said.endswith("or make it readable, then run again."), out
+        assert "UTF-8" not in out
+        assert _tree(target) == before
+    _installed(kit, target)
+
+
+def test_a_game_in_a_folder_of_its_repository_is_told_what_is_read_at_the_root(
+    kit: Path, tmp_path: Path
+) -> None:
+    """GitHub reads .github/ and pre-commit its config at the repository's root alone:
+    below it the workflow, the Copilot pointer and the hooks do nothing, and nothing said
+    so."""
+    repository = tmp_path / "repository"
+    (repository / ".git").mkdir(parents=True)
+    game = _target(repository / "games" / "one")
+    wanted = (
+        "note: the project is the folder 'games/one' of a git repository. GitHub and "
+        "pre-commit read .github/workflows/ci.yml, .github/copilot-instructions.md, "
+        ".pre-commit-config.yaml at the repository's root only: move them there and "
+        "put 'games/one/' in front of the paths they name; the workflow also needs "
+        "'working-directory: games/one' under 'defaults: run:'."
+    )
+    assert wanted in _installed(kit, game, "-DryRun")
+    assert wanted in _installed(kit, game)
+    # Said when the files are written, not at every update.
+    assert "of a git repository" not in _installed(kit, game)
+    # A file of the three that was the project's from the start is not the kit's to place.
+    own = _target(repository / "games" / "two")
+    for name in (".pre-commit-config.yaml", ".github/workflows/ci.yml"):
+        _write(own / name, "# mine\n")
+    out = _installed(kit, own, "-DryRun")
+    assert "pre-commit read .github/copilot-instructions.md at the repository's root" in out
+    # A project that is its repository's root gets no such note.
+    (game / ".git").mkdir()
+    shutil.rmtree(game / ".github")
+    (game / "tools" / "kit_manifest.json").unlink()
+    assert "of a git repository" not in _install(kit, game, "-DryRun").stdout
+
+
+def test_a_read_only_kit_copy_installs_files_that_can_be_updated(kit: Path, target: Path) -> None:
+    """A kit kept where nothing is writable (a mounted image, a package store): the copy
+    would take the mark along, and the next update could not replace the file."""
+    tool = kit / "tools" / "check.ps1"
+    page = kit / "docs" / "tools.md"
+    with _read_only(tool, page):
+        _installed(kit, target)
+        for relative in ("tools/check.ps1", "docs/tools.md"):
+            assert os.access(target / relative, os.W_OK), relative
+            assert stat.S_IMODE((target / relative).stat().st_mode) & stat.S_IWUSR, relative
+    tool.write_bytes(tool.read_bytes() + b"# a newer check\n")
+    assert "~ tools/check.ps1" in _installed(kit, target)
+
+
+@pytest.mark.parametrize("linked", ["tools", "addons", "addons/agent_devtools", "docs", ".github"])
+def test_no_file_is_written_through_a_link(kit: Path, target: Path, linked: str) -> None:
+    """Git does not look behind a link, so `git status` would show nothing of an install
+    that went through one, and the files would be someone else's folder."""
+    elsewhere = target.parent / "shared by two games"
+    _write(elsewhere / "mine.txt", "not the kit's\n")
+    _folder_link(target / linked, elsewhere)
+    out = _one_line_refusal(kit, target)
+    assert "install: the kit writes no file through a link, and the project has 1 on the way" in out
+    assert f"'{linked}' (to '" in out and "Put a real folder or file there" in out
+    assert _tree(elsewhere) == {"mine.txt": b"not the kit's\n"}
+
+
+def test_a_link_the_run_does_not_write_through_is_left_alone(kit: Path, target: Path) -> None:
+    # The project's own gdUnit4, shared between games through a link: kept, as any gdUnit4.
+    shared = target.parent / "shared gdUnit4"
+    pinned = json.loads(_read(kit / "kit.json"))["gdunit4"]["version"]
+    _write(shared / "plugin.cfg", f'[plugin]\n\nname="gdUnit4"\nversion="{pinned}"\n')
+    _folder_link(target / "addons" / "gdUnit4", shared)
+    out = _installed(kit, target)
+    assert f"gdUnit4        yours kept: {pinned}, the version the kit pins" in out
+    assert _tree(shared) == {"plugin.cfg": (shared / "plugin.cfg").read_bytes()}
+    assert _manifest(target)["wrote"]["gdunit4"] is False
+    assert "Up to date" in _installed(kit, target)
+
+
+@posix_only("a symbolic link to a file, made without a privilege")
+def test_a_link_where_a_file_goes_is_never_written_through(kit: Path, target: Path) -> None:
+    # A starter file of the project's own that is a link is the project's: kept.
+    shared = _write(target.parent / "shared.editorconfig", "root = true\n")
+    (target / ".editorconfig").symlink_to(shared)
+    # Links in the test folder are not followed, as the gates follow none: not round and
+    # round the one that leads back, and not to the suite that lives elsewhere.
+    (target / "test").mkdir()
+    (target / "test" / "again").symlink_to(target / "test", target_is_directory=True)
+    elsewhere = _write(
+        target.parent / "their suites" / "test_theirs.gd", "extends GdUnitTestSuite\n"
+    )
+    (target / "test" / "theirs").symlink_to(elsewhere.parent, target_is_directory=True)
+    # Where a kit file goes, where a starter file goes, where kit.json goes: each a link
+    # that points nowhere, which a write would follow. Last, the file the run edits.
+    nowhere = target.parent / "nowhere"
+    real = target.parent / "real project.godot"
+    for relative in ("tools/check.ps1", "addons/gdUnit4", "CLAUDE.md", "kit.json", "project.godot"):
+        link = target / relative
+        to = nowhere
+        if relative == "project.godot":
+            to = link.rename(real)
+        made = not link.parent.exists()
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(to)
+        out = _one_line_refusal(kit, target)
+        assert "the project has 1 on the way" in out and f"'{relative}' (to '{to}')" in out, out
+        assert not nowhere.exists()
+        link.unlink()
+        if relative == "project.godot":
+            real.rename(link)
+        elif made:
+            link.parent.rmdir()
+    out = _installed(kit, target)
+    assert "= .editorconfig   (yours kept; the kit's copy is not installed)" in out
+    assert _read(shared) == "root = true\n" and (target / ".editorconfig").is_symlink()
+    assert "starter test   test/unit/test_kit_smoke.gd" in out
+
+
+def test_a_link_to_the_kit_is_the_kit(kit: Path, tmp_path: Path) -> None:
+    before = _tree(kit)
+    _folder_link(tmp_path / "my game", kit)
+    out = _refused(kit, tmp_path / "my game")
+    assert "install: -Target is the kit itself, or a folder inside it." in out
+    assert len(out.strip().splitlines()) == 1, out
+    assert _tree(kit) == before
+
+
+def test_the_kit_under_other_letters_is_the_kit_where_the_file_system_says_so(
+    kit: Path, tmp_path: Path
+) -> None:
+    refusal = "install: -Target is the kit itself, or a folder inside it."
+    other = tmp_path / kit.name.upper()
+    assert str(other) != str(kit)
+    if not _keeps_letter_case_apart(tmp_path):
+        inside = _target(kit / "sample")
+        assert refusal in _refused(kit, other / "sample")
+        shutil.rmtree(inside)
+        return
+    # Two folders: a game in the one is no game inside the kit.
+    game = _target(other / "game")
+    _installed(kit, game)
+    # A volume that takes one name for the other answers to the script's name in other
+    # letters (macOS as it is installed): stood in for by a file of that name.
+    _write(kit / "INSTALL.PS1", "")
+    before = _tree(game)
+    out = _refused(kit, game)
+    assert refusal in out and len(out.strip().splitlines()) == 1, out
+    assert _tree(game) == before
+
+
+@pytest.mark.parametrize(
+    ("theirs", "kits"),
+    [
+        ("Tools/build.ps1", "tools"),
+        ("Addons/mine/plugin.cfg", "addons"),
+        ("addons/GdUnit4/plugin.cfg", "addons/gdUnit4"),
+        ("Docs/design.md", "docs"),
+        ("agents.md", "AGENTS.md"),
+        ("tools/Check.ps1", "tools/check.ps1"),
+    ],
+)
+def test_a_name_in_another_letter_case_is_not_given_a_twin(
+    kit: Path, target: Path, theirs: str, kits: str
+) -> None:
+    """`Tools/` in the project and `tools/` from the kit are two folders on Linux and one
+    on Windows and macOS: a project with both cannot be checked out there."""
+    if not _keeps_letter_case_apart(target.parent):
+        pytest.skip(APART)
+    _write(target / theirs, "mine\n")
+    named = "/".join(theirs.split("/")[: kits.count("/") + 1])
+    out = _one_line_refusal(kit, target)
+    assert "install: 1 name(s) in the project differ from the kit's in letter case only: " in out
+    assert f"'{named}' (the kit writes '{kits}')" in out and "Rename yours, then run again." in out
+    # Renamed, it installs. (Not the script: under the kit's name it is a file of yours
+    # with the name of a kit file.)
+    if kits != "tools/check.ps1":
+        (target / named).rename(target / kits)
+        _installed(kit, target)
+
+
+def test_a_project_with_both_spellings_keeps_both(kit: Path, target: Path) -> None:
+    if not _keeps_letter_case_apart(target.parent):
+        pytest.skip(APART)
+    theirs = {"Tools/build.ps1": "mine\n", "tools/mine.ps1": "mine too\n", "Docs/x.md": "# X\n"}
+    # Suites under both: the folder with the name as the kit spells it is the test root.
+    theirs |= {
+        "Tests/test_a.gd": "extends GdUnitTestSuite\n",
+        "tests/b.gd": "extends GdUnitTestSuite\n",
+    }
+    for relative, text in theirs.items():
+        _write(target / relative, text)
+    (target / "docs").mkdir()
+    _installed(kit, target)
+    assert json.loads(_read(target / "kit.json"))["tests"] == {"root": "tests"}
+    for relative, text in theirs.items():
+        assert _read(target / relative) == text, relative
+    assert (target / "tools" / "check.ps1").is_file() and (target / "docs" / "tools.md").is_file()
+    assert sorted(path.name for path in (target / "Tools").iterdir()) == ["build.ps1"]
+    assert "Up to date" in _installed(kit, target)
+
+
+def test_where_letter_case_is_ignored_the_kit_goes_into_your_folder(
+    kit: Path, target: Path
+) -> None:
+    if _keeps_letter_case_apart(target.parent):
+        pytest.skip(AS_ONE)
+    mine = _write(target / "Tools" / "build.ps1", "mine\n")
+    _write(target / "Docs" / "design.md", "# Mine\n")
+    # And says so, with the rename: AGENTS.md names docs/ and tools/ as the kit spells them,
+    # so the agents-md gate fails there until then, and Linux refuses the project.
+    note = (
+        "note: 2 name(s) in the project differ from the kit's in letter case only: "
+        "'Docs' (the kit writes 'docs'), 'Tools' (the kit writes 'tools'). This file system "
+        "takes the two for one name, so the kit's files go into yours. Rename yours, in two "
+        "steps (git mv Docs Docs-x, then git mv Docs-x docs): until then the agents-md gate fails"
+    )
+    assert note in _installed(kit, target, "-DryRun")
+    assert note in _installed(kit, target)
+    assert _read(mine) == "mine\n"
+    assert sorted(path.name for path in target.iterdir() if path.name.lower() == "tools") == [
+        "Tools"
+    ]
+    assert (target / "Tools" / "check.ps1").is_file() and (target / "Docs" / "tools.md").is_file()
+    # The manifest spells its paths as the kit does, whatever the folder is called.
+    manifest = _manifest(target)
+    assert "tools/check.ps1" in manifest["files"] and "docs/tools.md" in manifest["seeded"]
+    # Said at every run until the folders have the kit's names.
+    again = _installed(kit, target)
+    assert "Up to date" in again and note in again
+    for theirs, kits in (("Docs", "docs"), ("Tools", "tools")):
+        (target / theirs).rename(target / f"{theirs}-x")
+        (target / f"{theirs}-x").rename(target / kits)
+    renamed = _installed(kit, target)
+    assert "Up to date" in renamed and "letter case" not in renamed
+
+
+@pytest.mark.parametrize(
+    ("theirs", "is_folder", "message"),
+    [
+        ("docs", False, "'docs' in the project is a file where the kit needs a folder (for docs/"),
+        ("test", False, "'test' in the project is a file where the kit needs a folder (for test/"),
+        ("CLAUDE.md", True, "'CLAUDE.md' in the project is a folder where the kit writes a file"),
+        ("kit.json", True, "'kit.json' in the project is a folder where the kit writes a file"),
+    ],
+)
+def test_a_file_where_the_kit_needs_a_folder_is_named_before_the_first_write(
+    kit: Path, target: Path, theirs: str, is_folder: bool, message: str
+) -> None:
+    if is_folder:
+        (target / theirs).mkdir()
+    else:
+        _write(target / theirs, "mine\n")
+    out = _one_line_refusal(kit, target)
+    assert f"install: {message}" in out and "Rename or move it, then run again." in out
+
+
+def test_the_manifest_reads_the_same_on_every_system(kit: Path, target: Path) -> None:
+    """A project is shared through git by people on Windows and on Linux: the manifest one
+    of them commits is the other's, with whatever line ends their checkout gives the files."""
+    _installed(kit, target)
+    text = _read(target / "tools" / "kit_manifest.json")
+    manifest = json.loads(text)
+    assert "\\" not in text and "\r" not in text and text.endswith("}\n")
+    names = [*manifest["files"], *manifest["seeded"]]
+    assert all(re.fullmatch(r"[\w.-]+(/[\w.-]+)*", name) for name in names), names
+    # In one order on every system: each of the kit's folders by code point.
+    tools = [name for name in manifest["files"] if name.startswith("tools/")]
+    assert tools == sorted(tools) and len(tools) > 20
+    # As the other system checks it out: every text file with the other line ends.
+    other = b"\n" if b"\r\n" in (target / "tools" / "check.ps1").read_bytes() else b"\r\n"
+    for name in (*names, "tools/kit_manifest.json", "project.godot", ".gitignore", "kit.json"):
+        data = (target / name).read_bytes()
+        if b"\0" not in data:
+            (target / name).write_bytes(data.replace(b"\r\n", b"\n").replace(b"\n", other))
+    files = _tree(target)
+    assert "Up to date: nothing to write." in _installed(kit, target)
+    assert _tree(target) == files
+    # And an update from there is an update, not a conflict.
+    tool = kit / "tools" / "check.ps1"
+    tool.write_bytes(tool.read_bytes() + b"# a newer check\n")
+    (kit / "CLAUDE.md").write_bytes((kit / "CLAUDE.md").read_bytes() + b"\nNewer kit text.\n")
+    out = _installed(kit, target)
+    assert "~ tools/check.ps1" in out and "~ CLAUDE.md" in out
+    after = _read(target / "tools" / "kit_manifest.json")
+    assert "\\" not in after and "\r" not in after
+
+    # A backslash is no separator in a manifest, on any system: such a path is refused,
+    # not read as a file named `tools\build.ps1` here and as tools/build.ps1 there.
+    manifest = json.loads(after)
+    manifest["files"]["tools\\build.ps1"] = "0" * 64
+    _write(target / "tools" / "kit_manifest.json", json.dumps(manifest, indent=2) + "\n")
+    out = _one_line_refusal(kit, target)
+    assert "lists 'tools\\build.ps1', which is not a file inside the project" in out
+
+
 def test_a_gitignore_keeps_its_own_bytes(kit: Path, target: Path) -> None:
-    # Appended to, never rewritten: bytes that are not UTF-8 and a BOM both survive.
+    # Added to, its own bytes kept: bytes that are not UTF-8 and a BOM both survive.
     mine = b"\xef\xbb\xbf/artifacts/\n# f\xfcr mich\n.godot/"
     (target / ".gitignore").write_bytes(mine)
     out = _installed(kit, target)
@@ -835,7 +1500,7 @@ def test_your_own_gdlintrc_judges_your_scripts_and_not_the_kits(kit: Path, targe
     """max-line-length: 80 would fail the style gate on 104 lines of the kit's
     tools/*.gd, and `check.ps1 -Fix` would rewrite them into conflicts for the next upgrade."""
     gdtoolkit = Path(sys.executable).parent
-    assert (gdtoolkit / "gdlint.exe").is_file(), "run uv sync"
+    assert (gdtoolkit / venv_tool(REPO, "gdlint").name).is_file(), "run uv sync"
     _write(target / ".gdlintrc", "max-line-length: 80\n")
     out = _installed(kit, target)
     assert "note:" not in out
@@ -1177,6 +1842,18 @@ def test_what_the_project_already_has_is_kept(kit: Path, tmp_path: Path) -> None
     assert "Up to date" in _installed(kit, target)
 
 
+@pytest.mark.parametrize("written", ["res://spec/suites/", "spec\\suites", "./spec/suites"])
+def test_tests_root_is_read_as_the_tools_read_it(kit: Path, target: Path, written: str) -> None:
+    # A backslash is a separator in kit.json on every system (tools/kit_config.*): the
+    # starter test must not land in a folder named `spec\suites` on Linux.
+    _write(target / "kit.json", json.dumps({"tests": {"root": written}}) + "\n")
+    out = _installed(kit, target)
+    assert "starter test   spec/suites/unit/test_kit_smoke.gd" in out
+    assert (target / "spec" / "suites" / "unit" / "test_kit_smoke.gd").is_file()
+    assert sorted(path.name for path in target.iterdir() if "spec" in path.name) == ["spec"]
+    assert _manifest(target)["wrote"]["starter_test"] == "spec/suites/unit/test_kit_smoke.gd"
+
+
 def test_a_kit_json_of_yours_that_does_not_say_strict_gets_a_note(kit: Path, target: Path) -> None:
     # No gdscript.strict means strict: the first check would fail on 16 warnings.
     _write(target / "kit.json", '{"tests": {"root": "test"}}\n')
@@ -1260,6 +1937,10 @@ def test_the_manifest_lists_everything_removing_the_kit_has_to_undo(
         # A gdUnit4 suite under another name is a suite: its folder is the root.
         ("spec", "spec/BoardTest.gd", "spec", False),
         ("tests", "tests/helpers/fixtures.gd", "test", True),  # no suite there
+        # In the project's spelling, on every system: the tools read tests.root as written.
+        ("Tests", "Tests/test_board.gd", "Tests", False),
+        ("Test", "Test/unit/test_board.gd", "Test", False),
+        ("SPEC", "SPEC/BoardTest.gd", "SPEC", False),
     ],
 )
 def test_tests_root_is_where_the_suites_are(
@@ -1349,6 +2030,72 @@ def test_the_kit_itself_and_a_missing_target_are_refused(kit: Path, tmp_path: Pa
     assert unknown.stdout.strip() == ""
 
 
+@posix_only("SIGINT, which is Ctrl+C there, and a file that waits for its writer (a FIFO)")
+def test_a_run_stopped_with_ctrl_c_says_so_and_the_next_finishes_it(
+    kit: Path, target: Path
+) -> None:
+    """Ctrl+C is no error: PowerShell ends the script and runs no trap. The run exited 0
+    and said nothing. A kit file that is a FIFO holds the copy until this test lets go,
+    so the installer is stopped while it writes."""
+    held = kit / "addons" / "gdUnit4" / "LICENSE"  # the first file of the gdUnit4 copy
+    text = held.read_bytes()
+    held.unlink()
+    os.mkfifo(held)
+    partial = target / "addons" / ".gdUnit4.kit-partial"
+    process = subprocess.Popen(
+        [PWSH, "-NoProfile", "-NonInteractive", "-File", str(kit / "install.ps1")]
+        + ["-Target", str(target)],
+        cwd=kit.parent,
+        env=clean_env(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    try:
+        deadline = time.monotonic() + 120
+        while not partial.is_dir() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert partial.is_dir(), "the installer never came to the gdUnit4 copy"
+        time.sleep(0.5)  # the copy has opened the FIFO, or is about to
+        process.send_signal(signal.SIGINT)
+        time.sleep(0.5)
+        # Let the copy end. No reader (ENXIO): the run was stopped before it opened the file.
+        with contextlib.suppress(OSError):
+            os.close(os.open(held, os.O_WRONLY | os.O_NONBLOCK))
+        out, _ = process.communicate(timeout=120)
+    finally:
+        process.kill()
+    assert process.returncode == 1, out
+    assert out.rstrip().endswith(
+        "install: interrupted: stopped halfway. Run the same command again."
+    ), out
+    assert "Installed." not in out
+
+    held.unlink()
+    held.write_bytes(text)
+    assert "Installed." in _installed(kit, target)
+    assert "Up to date" in _installed(kit, target)
+
+
+def test_a_powershell_that_cannot_compute_a_checksum_is_refused_before_the_first(
+    kit: Path, target: Path
+) -> None:
+    """PowerShell 7.0 and 7.1 abort where they hash, on a Linux with OpenSSL 3 alone: the
+    installer hashes every file it compares. It asks first, as setup.ps1 does."""
+    old_powershell(kit, "it cannot compute a checksum")
+    before = _tree(target)
+    for args in ((), ("-DryRun",), ("-Force",)):
+        out = _refused(kit, target, *args)
+        said = out.strip().splitlines()
+        assert len(said) == 1, out
+        assert said[0].startswith("install: PowerShell 7."), out
+        assert ": it cannot compute a checksum. Fix: " in said[0]
+        assert _tree(target) == before
+
+
 def test_get_help_shows_the_description() -> None:
     # A line of the help block that starts with a dot is read as a help keyword, and one
     # unknown keyword hides the whole block.
@@ -1382,9 +2129,11 @@ def test_an_incomplete_kit_copy_is_refused_up_front(kit: Path, target: Path, mis
 
 
 def test_a_relative_target_is_read_from_the_callers_folder(kit: Path, target: Path) -> None:
-    # _install runs from the folder that holds both; the script lives elsewhere.
-    out = _installed(kit, f".\\{target.name}", "-DryRun")
-    assert f"-> {target}" in out
+    # _install runs from the folder that holds both; the script lives elsewhere. PowerShell
+    # reads either slash as a separator, on every system.
+    for written in (f"./{target.name}", f".\\{target.name}", f"{target.name}/"):
+        out = _installed(kit, written, "-DryRun")
+        assert f"-> {target}   (dry run" in out, written
 
 
 def test_other_godot_versions_and_csharp_are_warned_about(kit: Path, target: Path) -> None:
@@ -1400,14 +2149,23 @@ def test_the_ci_workflow_runs_scripts_and_switches_that_exist() -> None:
     # The workflow is copied into projects and cannot be run here: pin what it calls.
     text = (REPO / ".github" / "workflows" / "ci.yml").read_bytes().decode("ascii")
     assert "\t" not in text and "\r" not in text.replace("\r\n", "\n")
-    runs = re.findall(r"^ +run: \./(tools/\w+\.ps1)((?: -\w+(?: \d+)?)*)$", text, re.M)
-    assert [script for script, _ in runs] == ["tools/setup.ps1", "tools/check.ps1"]
+    started = r'^ +pwsh \./(tools/(\w+)\.ps1)((?: -\w+(?: \d+)?)*) \| tee "\$RUNNER_TEMP/\2\.out"$'
+    runs = re.findall(started, text, re.M)
+    assert [script for script, _, _ in runs] == ["tools/setup.ps1", "tools/check.ps1"]
     assert text.count("run:") == len(runs) + 1  # the two steps and `defaults: run:`
-    for script, arguments in runs:
+    assert text.count("pwsh ./") == len(runs)
+    for script, _name, arguments in runs:
         source = _read(REPO / script)
         for name, value in re.findall(r"-(\w+)(?: (\d+))?", arguments):
             kind = "int" if value else "switch"
             assert re.search(rf"\[{kind}\]\${name}\b", source), f"{script} -{name}"
+    # Each step asks for the line its script ends on: the scripts say these words.
+    assert '"setup: ready"*) ;;' in text and '"setup: ready.' in _read(REPO / "tools/setup.ps1")
+    assert '"check: PASSED"*) ;;' in text and '"check: PASSED: ' in _read(REPO / "tools/check.ps1")
+    # A gate that hangs to its limit still ends inside the job's own.
+    minutes = int(re.search(r"^    timeout-minutes: (\d+)$", text, re.M).group(1))
+    gate_seconds = int(re.search(r"-GateTimeoutSeconds (\d+)", text).group(1))
+    assert minutes * 60 >= 2 * gate_seconds + 600
     uses = re.findall(r"uses: ([\w./-]+)@(\S+)(.*)", text)
     assert [name for name, _, _ in uses] == [
         "actions/checkout",
@@ -1419,15 +2177,100 @@ def test_the_ci_workflow_runs_scripts_and_switches_that_exist() -> None:
     for name, ref, comment in uses:
         assert re.fullmatch(r"[0-9a-f]{40}", ref), f"{name}@{ref}"
         assert re.fullmatch(r" # v\d+\.\d+\.\d+", comment), f"{name}: {comment!r}"
+    # One job on every system the kit is run on: the same two commands, in pwsh on each. A
+    # red check on one system does not cancel the other, and each keeps its own Godot
+    # cache (per system and processor) and its own artifact, also when the job is
+    # cancelled for running out of time.
     for needed in (
-        "runs-on: windows-latest",
-        "shell: pwsh",
+        "runs-on: ${{ matrix.os }}",
+        "os: [ubuntu-latest, windows-latest]",
+        "fail-fast: false",
+        "shell: bash",
         "path: .tools/godot",
-        "hashFiles('kit.json')",
-        "if: failure()",
+        "key: godot-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kit.json') }}",
+        "if: ${{ failure() || cancelled() }}",
+        "name: check-artifacts-${{ matrix.os }}",
         "path: artifacts/",
     ):
         assert needed in text, needed
+    assert text.count("runs-on:") == 1 and text.count("shell:") == 1
+    # For the whole job, so for the PowerShell of each step: none rewrites the startup
+    # profile, which two that end together can leave mixed.
+    job_env = r"^    env:\n(?:      #.*\n)*      DOTNET_MultiCoreJitNoProfileGather: 1$"
+    assert re.search(job_env, text.replace("\r\n", "\n"), re.M)
+
+
+def _ci_steps() -> dict[str, str]:
+    """The bash text of each `run: |` step of the CI workflow, by the script it starts."""
+    text = (REPO / ".github" / "workflows" / "ci.yml").read_bytes().decode("ascii")
+    steps = {}
+    for block in re.findall(r"^ +run: \|\n((?:(?: {10}.*)?\n)+)", text.replace("\r\n", "\n"), re.M):
+        body = "\n".join(line[10:] for line in block.splitlines()) + "\n"
+        steps[re.search(r"tools/(\w+)\.ps1", body).group(1)] = body
+    return steps
+
+
+def _git_bash() -> str | None:
+    """The bash a CI step runs in: on Windows the one Git for Windows brings (never the
+    `bash.exe` in System32, which starts another system)."""
+    if not WINDOWS:
+        return shutil.which("bash")
+    git = shutil.which("git")
+    # git.exe is cmd/git.exe of the Git folder, or mingw64/bin/git.exe inside its own bash.
+    for folder in Path(git).resolve().parents if git else ():
+        bash = folder / "bin" / "bash.exe"
+        if bash.is_file() and (folder / "cmd" / "git.exe").is_file():
+            return str(bash)
+    return None
+
+
+@pytest.mark.parametrize(
+    ("said", "code", "passes"),
+    [
+        # A PowerShell that aborts as it starts: two lines of its own, nothing run, exit 0.
+        ("An error has occurred that was not properly handled.", 0, False),
+        ("", 0, False),
+        ("{name}: {good} and more", 0, True),
+        ("{name}: {good}\nand a line after it", 0, False),
+        ("check: FAILED (gdlint): 13 passed, 1 failed, 1 skipped in 9.9s", 1, False),
+        ("{name}: {good}", 3, False),
+    ],
+)
+def test_a_ci_step_passes_on_the_last_line_of_its_script_alone(
+    tmp_path: Path, said: str, code: int, passes: bool
+) -> None:
+    """With a mixed startup profile `pwsh` runs nothing and exits 0: a step that trusted the
+    exit code was green. Each step's own bash text is run here with a stand-in `pwsh`."""
+    bash = _git_bash()
+    if bash is None:
+        pytest.skip("needs bash (on Windows: Git for Windows)")
+    steps = _ci_steps()
+    assert sorted(steps) == ["check", "setup"]
+    stand_in = tmp_path / "bin" / "pwsh"
+    stand_in.parent.mkdir()
+    for name, good in (("setup", "ready"), ("check", "PASSED")):
+        lines = said.format(name=name, good=good).splitlines()
+        echoes = "".join(f"printf '%s\\n' '{line}'\n" for line in lines)
+        stand_in.write_text(f"#!/bin/sh\n{echoes}exit {code}\n", encoding="ascii", newline="\n")
+        stand_in.chmod(0o755)
+        step = tmp_path / f"{name}.sh"
+        step.write_text(steps[name], encoding="ascii", newline="\n")
+        env = clean_env(RUNNER_TEMP=str(tmp_path))
+        env["PATH"] = str(stand_in.parent) + os.pathsep + env["PATH"]
+        ran = subprocess.run(
+            [bash, "--noprofile", "--norc", "-eo", "pipefail", str(step)],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert (ran.returncode == 0) == passes, (
+            f"{name}: {ran.returncode}\n{ran.stdout}{ran.stderr}"
+        )
+        if not passes and code == 0:
+            assert f"::error::{name}.ps1 did not end with '{name}: {good}'" in ran.stdout
 
 
 @pytest.mark.real_godot
@@ -1438,8 +2281,8 @@ def test_the_installed_project_loads_and_runs_its_starter_test(tmp_path: Path) -
     kit = _copy_kit(tmp_path / "kit's [copy]", whole_gdunit=True)
     target = _target(tmp_path / "it's a [wip] game")
     _installed(kit, target, "-StrictWarnings")
-    # Godot's user data (logs, caches) goes to the temp folder, not the real profile.
-    env = clean_env(GODOT_BIN=godot, APPDATA=str(tmp_path / "userdata"))
+    # Godot's user data (logs, caches) goes to the temp folder, not among the developer's own.
+    env = clean_env(GODOT_BIN=godot, **user_data_env(tmp_path / "user data"))
 
     imported = subprocess.run(
         [godot, "--headless", "--path", str(target), "--import"],
@@ -1472,3 +2315,5 @@ def test_the_installed_project_loads_and_runs_its_starter_test(tmp_path: Path) -
     # Godot wrote .uid files for the project's own scripts; the kit's files are untouched.
     assert "Up to date" in _installed(kit, target, "-StrictWarnings")
     assert (target / "player.gd.uid").is_file()
+    # And its user data where this test put it: the project is named "Target".
+    assert list((tmp_path / "user data").rglob("app_userdata/Target")), "user data went elsewhere"

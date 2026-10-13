@@ -12,7 +12,9 @@ Godot scans: addons included, but no dot-folders, .gdignore'd folders or nested
 projects (the folder rule of tools/kit_config.ps1, without source.exclude). It
 does not follow directory links.
 Update-GodotClassCache runs a headless `--import`, which rewrites the cache,
-and throws with Godot's output if the import fails.
+and throws with Godot's output if the import fails. It is an editor run: it
+reads your editor settings (an import may need them: the path to Blender) and
+uses your own Godot folders, also when a gate starts it.
 
 Dot-source this file; it defines functions only.
 #>
@@ -41,8 +43,12 @@ function Get-GodotClassScriptEntries {
             if ([System.IO.File]::Exists((Join-Path $sub.FullName "project.godot"))) { continue }
             $pending.Push($sub.FullName)
         }
-        foreach ($full in [System.IO.Directory]::EnumerateFiles($dir, "*.gd")) {
-            $match = Select-String -LiteralPath $full -Pattern $pattern -List
+        foreach ($full in [System.IO.Directory]::EnumerateFiles($dir)) {
+            # The extension in any letter case, as tools/kit_config.py reads it: a
+            # "*.gd" pattern finds X.GD on Windows only.
+            if (-not $full.EndsWith(".gd", [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+            # -CaseSensitive: GDScript's keywords are lower case.
+            $match = Select-String -LiteralPath $full -Pattern $pattern -List -CaseSensitive
             if ($null -ne $match) {
                 $name = $match.Matches[0].Groups["name"].Value
                 $resPath = "res://" + $full.Substring($root.Length + 1).Replace('\', '/')
@@ -109,10 +115,10 @@ function Test-GodotImportArg {
     param([string[]]$GodotArgs)
 
     foreach ($argument in $GodotArgs) {
-        if ($argument -eq "--" -or $argument -eq "++") {
+        if ($argument -ceq "--" -or $argument -ceq "++") {
             return $false
         }
-        if ($argument -eq "--import") {
+        if ($argument -ceq "--import") {
             return $true
         }
     }

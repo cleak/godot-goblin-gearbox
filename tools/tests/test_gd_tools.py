@@ -224,9 +224,10 @@ class Project:
     def __init__(self, root: Path, godot: Path) -> None:
         self.root = root / "project"
         self.godot = godot
-        # Godot's user data (logs, caches) goes to the temp folder, not the real profile.
-        self.env = os.environ.copy()
-        for variable in ("APPDATA", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+        # Godot's user data (logs, caches) goes to the temp folder, not the real profile:
+        # by the variable this system's Godot reads, and on Linux its two other folders.
+        self.env = os.environ | _gate_fixtures.user_data_env(root / "userdata")
+        for variable in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
             self.env[variable] = str(root / "userdata")
         self.write("project.godot", PROJECT_GODOT)
         self.write("scripts/game.gd", "extends Node\n\nvar score: int = 3\n", UID_GAME)
@@ -314,6 +315,19 @@ class Project:
 @pytest.fixture
 def project(tmp_path: Path, godot: Path) -> Project:
     return Project(tmp_path, godot)
+
+
+def test_godot_keeps_its_user_data_in_the_temp_folder(project: Project, tmp_path: Path) -> None:
+    """Every Godot these tests start writes its logs below the test's own folder, never
+    among the developer's: the variable that moves them is this system's."""
+    project.add_game()
+    code, out = project.tool("validate_all")
+    assert code == 0, out
+    base = Path(_gate_fixtures.godot_data_root(project.env))
+    assert tmp_path / "userdata" in (base, *base.parents)
+    # "Godot" on Windows and macOS, "godot" on Linux.
+    kept = [folder.name for folder in base.glob("[Gg]odot/app_userdata/*")]
+    assert kept == ["Kit tool fixture"], kept
 
 
 # --- lint_project.gd ---

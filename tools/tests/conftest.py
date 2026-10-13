@@ -11,6 +11,10 @@ A test gets the mark by asking for it (`@pytest.mark.real_godot`), or by using a
 that hands out the binary. The mark is enforced, not trusted: without it
 _gate_fixtures.real_godot() fails the test, and the variables that name a Godot are taken
 out of its environment.
+
+No PowerShell a test starts may write the developer's PowerShell startup profile
+(_gate_fixtures.NO_STARTUP_PROFILE says why): the variable that stops it is put into this
+process's environment, which every program a test starts inherits.
 """
 
 from __future__ import annotations
@@ -24,6 +28,9 @@ import pytest
 MARK = "real_godot"
 # Fixtures whose value comes from a real Godot (test_gd_tools.py, test_kit_config_parity.py).
 REAL_GODOT_FIXTURES = frozenset({"godot", "godot_records"})
+
+# Here and not in a fixture: before the first test, on every worker.
+os.environ.update(_gate_fixtures.NO_STARTUP_PROFILE)
 
 
 def pytest_configure(config: pytest.Config) -> None:

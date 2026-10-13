@@ -4,30 +4,40 @@ The gates themselves are stubs here (their own tests cover them) and Godot is a 
 so these tests pin the orchestration: order, exit code, what is printed, what is skipped.
 """
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 from _gate_fixtures import (
     DEVTOOLS_AUTOLOAD,
-    PWSH,
+    LINUX,
+    NEEDS_PWSH,
+    NO_STARTUP_PROFILE,
+    QUIET_DOTNET,
     REPO,
+    STARTUP_PROFILE_VARIABLE,
     WINDOWS,
+    bare_path,
     clean_env,
     copy_python_tools,
     fake_godot,
     fake_uv,
+    forget,
+    powershell_version,
     project_godot,
     run_tool,
+    startup_profiles,
     write,
     write_kit_json,
 )
 
-pytestmark = pytest.mark.skipif(not WINDOWS or PWSH is None, reason="Windows PowerShell 7 gates")
+pytestmark = NEEDS_PWSH
 
 STUB_GATES = {
     "ascii": "test_scripts_ascii.ps1",
@@ -189,6 +199,29 @@ def test_python_gates_and_the_first_uv_sync(tmp_path: Path) -> None:
     assert _rows(failed.stdout)["gdlint"][0] == "pass"  # the stub gate needs no .venv
 
 
+def test_without_uv_the_python_gates_are_skipped_and_say_why(tmp_path: Path) -> None:
+    """On a PATH with nothing on it, on every system: no uv, no git, no Godot but the one
+    GODOT_BIN names. The other gates still run."""
+    root, env = _project(tmp_path)
+    write(root / "pyproject.toml", '[project]\nname = "fixture"\nversion = "0"\n')
+    write(root / "tools" / "helper.py", "VALUE = 1\n")
+    (root / "tools" / "tests").mkdir()
+    result = run_tool(root, "check.ps1", "-SkipTests", env=env | {"PATH": bare_path()})
+    assert result.returncode == 0, result.stdout + result.stderr
+    rows = _rows(result.stdout)
+    no_uv = ("skipped", "uv not found (https://docs.astral.sh/uv/)")
+    assert rows["ruff"] == no_uv and rows["pytest"] == no_uv
+    assert rows["gdlint"][0] == "pass" and rows["validate-all"][0] == "pass"
+    assert "uv sync" not in result.stdout  # nothing to run it with
+
+    # -Changed asks git, through uv, what changed: that cannot be skipped.
+    write(root / "tools" / "test_shards.py", "print('No suites to run.')\n")
+    changed = run_tool(root, "check.ps1", "-Changed", env=env | {"PATH": bare_path()})
+    assert changed.returncode == 1, changed.stdout + changed.stderr
+    needs_uv = ("FAIL", "-Changed needs uv (https://docs.astral.sh/uv/)")
+    assert _rows(changed.stdout)["tests"] == needs_uv
+
+
 def test_ruff_gate_leaves_the_kits_installed_files_to_the_kits_rules(tmp_path: Path) -> None:
     """In a project install.ps1 put the kit into, `ruff check tools` held the kit's Python
     files to that project's own ruff rules."""
@@ -209,16 +242,24 @@ def test_ruff_gate_leaves_the_kits_installed_files_to_the_kits_rules(tmp_path: P
     # The kit's own repository: no manifest, everything is checked.
     assert ruff_row() == (("pass", "FAKE_UV run ruff check tools"), ["run ruff check tools"])
 
-    manifest = (
-        '{"files": {"tools/devtools.py": "0", "tools/CI/suites.py": "0", "tools/x.ps1": "0"}}'
-    )
-    write(root / "tools" / "kit_manifest.json", manifest)
+    # Windows ignores the letter case of a name; elsewhere tools/CI is another folder.
+    spelled = "tools/CI/suites.py" if WINDOWS else "tools/ci/suites.py"
+    manifest = {"files": {"tools/devtools.py": "0", spelled: "0", "tools/x.ps1": "0"}}
+    write(root / "tools" / "kit_manifest.json", json.dumps(manifest))
     reason = "tools/ holds only the kit's Python files (tools/kit_manifest.json lists them)"
     assert ruff_row() == (("skipped", reason), [])
 
     write(root / "tools" / "build" / "my_export.py", "VALUE = 3\n")
     mine = "run ruff check tools/build/my_export.py"
     assert ruff_row() == (("pass", f"FAKE_UV {mine}"), [mine])
+
+    if not WINDOWS:
+        # The kit's tools/CI/suites.py is not this project's tools/ci/suites.py.
+        manifest["files"] = {"tools/devtools.py": "0", "tools/CI/suites.py": "0"}
+        write(root / "tools" / "kit_manifest.json", json.dumps(manifest))
+        row, asked = ruff_row()
+        assert row[0] == "pass" and len(asked) == 1
+        assert sorted(asked[0].split()[3:]) == ["tools/build/my_export.py", "tools/ci/suites.py"]
 
     write(root / "tools" / "kit_manifest.json", "{ not json")
     row, asked = ruff_row()
@@ -403,16 +444,69 @@ def test_missing_godot_fails_the_godot_gates(tmp_path: Path) -> None:
     assert "GODOT_BIN does not name an executable file" in result.stdout
 
 
-def test_a_hung_gate_is_killed_and_reported(tmp_path: Path) -> None:
+HEARTBEAT = """import sys
+import time
+
+for _ in range(600):
+    with open(sys.argv[1], "a") as beat:
+        beat.write(".")
+    time.sleep(0.2)
+"""
+
+
+def test_a_hung_gate_is_killed_with_what_it_started_and_reported(tmp_path: Path) -> None:
+    """The gate is a PowerShell that waits for a program of its own: both must go, or the
+    program (a Godot, in a real run) keeps the machine busy after the check has ended."""
     root, env = _project(tmp_path)
-    write(root / "tools" / "lint_gdscript.ps1", "Write-Host 'about to hang'\nStart-Sleep 120\n")
+    beat = tmp_path / "beat.txt"
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    env = env | {
+        "KIT_PYTHON": sys.executable,
+        "KIT_HEARTBEAT": str(write(tmp_path / "heartbeat.py", HEARTBEAT)),
+        "KIT_BEAT": str(beat),
+        "KIT_TOLD": str(tmp_path / "told.txt"),
+        "TMPDIR": str(temp),
+    }
+    # As a developer's shell is: the check itself must ask its gates to keep no files and
+    # to write no startup profile. (This check's own PowerShell then writes one, as any
+    # does: into a folder of the test's.)
+    forget(env, *QUIET_DOTNET, *NO_STARTUP_PROFILE)
+    (tmp_path / "own").mkdir()
+    env[STARTUP_PROFILE_VARIABLE] = str(tmp_path / "own")
+    write(
+        root / "tools" / "lint_gdscript.ps1",
+        "Set-Content -LiteralPath $env:KIT_TOLD "
+        '-Value "gather=$env:DOTNET_MultiCoreJitNoProfileGather"\n'
+        "Write-Host 'about to hang'\n& $env:KIT_PYTHON $env:KIT_HEARTBEAT $env:KIT_BEAT\n",
+    )
     # Long enough for the other gates to start on a busy machine.
+    started = time.monotonic()
     result = run_tool(root, "check.ps1", "-GateTimeoutSeconds", "10", "-SkipTests", env=env)
     assert result.returncode == 1, result.stdout + result.stderr
     rows = _rows(result.stdout)
     assert rows["gdlint"] == ("FAIL", "timed out after 10 s")
     assert "about to hang" in result.stdout
     assert rows["typecheck"][0] == "pass"
+    # The program ran, and nothing of it is left: its heartbeat has stopped. (Left alive
+    # on Windows it keeps the check's output open, and whoever reads that waits for it.)
+    beats = beat.stat().st_size
+    assert beats > 0
+    assert time.monotonic() - started < 90
+    time.sleep(1.5)
+    assert beat.stat().st_size == beats
+    # Linux and macOS: a killed PowerShell leaves .NET's pipes in the temp folder unless it
+    # was started with Get-KitQuietPowerShellEnvironment. (Windows keeps no such file, and
+    # TMPDIR names no folder there.)
+    left = sorted(path.name for path in temp.iterdir())
+    assert [
+        name for name in left if name.startswith(("clr-debug-pipe-", "dotnet-diagnostic-"))
+    ] == []
+    # Every system: the gate's PowerShell was told to write no startup profile.
+    assert (tmp_path / "told.txt").read_text().strip() == "gather=1"
+    # And this check's own went where the test put it (7.0 and 7.1 keep it elsewhere).
+    if powershell_version() >= (7, 2):
+        assert startup_profiles(tmp_path / "own"), "the check's own profile went elsewhere"
 
 
 def test_scenes_gate_runs_devtools_validation_when_the_autoload_is_there(tmp_path: Path) -> None:
@@ -436,11 +530,23 @@ def test_scenes_gate_runs_devtools_validation_when_the_autoload_is_there(tmp_pat
     )
     assert validate not in log.read_text()
 
+    # Registered, and no main scene: no game starts. Godot would say so in a dialog and
+    # wait for a click, with --headless too; the gate would sit there until its timeout.
+    write(root / "project.godot", project_godot(autoloads=DEVTOOLS_AUTOLOAD))
+    sceneless = run_tool(root, "check.ps1", "-SkipTests", env=env)
+    assert sceneless.returncode == 0, sceneless.stdout + sceneless.stderr
+    assert _rows(sceneless.stdout)["scenes"] == (
+        "skipped",
+        "no main scene: project.godot sets no application/run/main_scene, so no game starts",
+    )
+    assert validate not in log.read_text()
+
     # Registered, by path or by the uid the editor writes.
     write(root / "addons" / "agent_devtools" / "dev_tools.gd.uid", "uid://qba8jpa33rfr\n")
     for entry in (DEVTOOLS_AUTOLOAD["DevTools"], "*uid://qba8jpa33rfr"):
         log.unlink()
-        write(root / "project.godot", project_godot(autoloads={"DevTools": entry}))
+        project = project_godot(autoloads={"DevTools": entry}, main_scene="res://main.tscn")
+        write(root / "project.godot", project)
         said = env | {
             "FAKE_GODOT_BREAK": "--devtools-validate",
             "FAKE_GODOT_SAYS": "DevTools: Scenes valid: 3 checked, 0 errors, 1 warnings",
@@ -707,6 +813,10 @@ def test_changed_runs_pytest_only_when_the_kit_itself_changed(tmp_path: Path) ->
     write(root / "test" / "unit" / "test_enemy.gd", "extends GdUnitTestSuite\n")
     write(root / "addons" / "third_party" / "plugin.gd", "extends Node\n")
     write(root / "tooling" / "notes.md", "not the tools folder\n")
+    if LINUX:
+        # Another letter case is another folder there, and another file.
+        write(root / "Tools" / "notes.md", "not the tools folder either\n")
+        write(root / "Kit.json", "{}\n")
     assert pytest_row("-Changed") == ("skipped", PYTEST_SKIPPED)
     _git(root, "checkout", "--quiet", "-b", "work")
     _git(root, "add", "-A")

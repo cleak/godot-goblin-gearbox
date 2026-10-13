@@ -8,24 +8,28 @@ from pathlib import Path
 import pytest
 from _gate_fixtures import (
     DEVTOOLS_AUTOLOAD,
-    PWSH,
+    NEEDS_PWSH,
+    NEEDS_UV,
+    PLATFORM,
     REPO,
-    WINDOWS,
+    bare_path,
     clean_env,
     copy_tools,
     fake_godot,
+    fake_uv,
     lone_gui_godot,
     project_godot,
+    python_program,
     ready_project,
+    run_powershell,
     run_tool,
+    venv_tool,
+    windows_only,
     write,
     write_kit_json,
 )
 
-pytestmark = pytest.mark.skipif(
-    not WINDOWS or PWSH is None or shutil.which("uv") is None,
-    reason="Windows PowerShell 7 tools with uv installed",
-)
+pytestmark = [NEEDS_PWSH, NEEDS_UV]
 
 
 DEVTOOLS = DEVTOOLS_AUTOLOAD
@@ -82,7 +86,7 @@ def _no_cache(root: Path) -> None:
 
 
 def _no_gdformat(root: Path) -> None:
-    (root / ".venv" / "Scripts" / "gdformat.exe").unlink()
+    venv_tool(root, "gdformat").unlink()
 
 
 def _own_pyproject(root: Path) -> None:
@@ -148,6 +152,193 @@ def test_missing_godot_names_the_installer(tmp_path: Path) -> None:
     assert result.returncode == 1, result.stdout + result.stderr
     assert "[FAIL] GODOT_BIN does not name an executable file" in result.stdout
     assert "fix: pwsh ./tools/install_godot.ps1" in result.stdout
+
+
+HINTS = {
+    "windows": ("winget install astral-sh.uv", "winget install Git.Git"),
+    "macos": ("brew install uv", "xcode-select --install"),
+    "linux": (
+        "install uv: https://docs.astral.sh/uv/getting-started/installation/",
+        "install git with your package manager (apt install git, dnf install git)",
+    ),
+}
+
+
+def test_a_missing_program_names_the_fix_for_each_system(tmp_path: Path) -> None:
+    root, env = _ready_project(tmp_path)
+    call = (
+        ". $env:KIT_CONFIG; foreach ($system in 'windows', 'macos', 'linux') { "
+        "foreach ($tool in 'uv', 'git') { Get-KitInstallHint -Tool $tool -Platform $system } }"
+    )
+    said = run_powershell(call, env=env | {"KIT_CONFIG": str(root / "tools" / "kit_config.ps1")})
+    assert said.returncode == 0, said.stdout + said.stderr
+    hints = said.stdout.splitlines()
+    expected = [hint for system in ("windows", "macos", "linux") for hint in HINTS[system]]
+    assert len(hints) == len(expected), said.stdout
+    for hint, start in zip(hints, expected, strict=True):
+        assert hint.startswith(start)
+
+    # On this machine: no uv is a failure, no git a warning, each with its fix.
+    uv, git = HINTS[PLATFORM]
+    bare = run_tool(root, "doctor.ps1", env=env | {"PATH": bare_path(tmp_path / "empty")})
+    assert bare.returncode == 1, bare.stdout + bare.stderr
+    assert "[FAIL] uv not found (it installs and runs the Python tools)" in bare.stdout
+    assert f"       fix: {uv}" in bare.stdout
+    assert "[warn] git not found" in bare.stdout and f"       fix: {git}" in bare.stdout
+    fake_uv(tmp_path / "bin")
+    found = run_tool(root, "doctor.ps1", env=env | {"PATH": bare_path(tmp_path / "bin")})
+    assert found.returncode == 0, found.stdout + found.stderr
+    assert "[ok]   uv 0.0.0 (fake)" in found.stdout and "1 warning(s), 0 failed" in found.stdout
+
+
+def test_apples_placeholder_git_is_not_taken_for_git(tmp_path: Path) -> None:
+    """Every Mac has /usr/bin/git. Without Apple's Command Line Tools it runs no git command
+    and asks to install them: "[ok] git" was said for it. macOS is never run here: the rule
+    is asked with the system passed in and a stand-in for `xcode-select`."""
+    root, env = _ready_project(tmp_path)
+    absent = python_program(tmp_path / "absent", "xcode-select", "import sys\nsys.exit(2)\n")
+    there = python_program(tmp_path / "there", "xcode-select", "print('/Library/Developer')\n")
+    call = (
+        ". $env:KIT_RESOLVER; $said = @(foreach ($case in @("
+        "@('macos', '/usr/bin/git', $env:ABSENT), @('macos', '/usr/bin/git', $env:THERE), "
+        "@('macos', '/opt/homebrew/bin/git', $env:ABSENT), @('macos', '/usr/bin/git', $env:NONE), "
+        "@('linux', '/usr/bin/git', $env:ABSENT), @('windows', '/usr/bin/git', $env:ABSENT))) { "
+        "'<' + (Get-KitGitProblem -Platform $case[0] -GitPath $case[1] -XcodeSelect $case[2]) + '>'"
+        ' }); $said -join "`n"'
+    )
+    own = {
+        "KIT_RESOLVER": str(root / "tools" / "godot_resolver.ps1"),
+        "ABSENT": str(absent),
+        "THERE": str(there),
+        "NONE": str(tmp_path / "no such program"),
+    }
+    said = run_powershell(call, env=env | own)
+    assert said.returncode == 0, said.stdout + said.stderr
+    placeholder = (
+        "<git is Apple's placeholder (/usr/bin/git): the Command Line Tools are not installed>"
+    )
+    assert said.stdout.splitlines() == [placeholder, "<>", "<>", "<>", "<>", "<>"]
+    # doctor.ps1 asks it of the git it found: here that is a git, or none at all.
+    source = (REPO / "tools" / "doctor.ps1").read_text(encoding="ascii")
+    assert "Get-KitGitProblem -GitPath $git[0].Source" in source
+
+
+OPENSSL = "7.0 and 7.1 cannot compute a checksum where only OpenSSL 3 is installed"
+# True on every Mac, Intel or Apple silicon.
+MAC = "7.0 and 7.1 are not tested there and have no Apple silicon build"
+POWERSHELLS = [
+    # (version, system, what is wrong with it there)
+    ("7.0", "windows", ""),
+    ("7.1", "windows", ""),
+    ("7.6", "windows", ""),
+    ("5.1", "windows", "the kit's scripts need 7 or newer"),
+    ("7.0", "linux", f"on Linux the kit's scripts need 7.2 or newer: {OPENSSL}"),
+    ("7.1", "linux", f"on Linux the kit's scripts need 7.2 or newer: {OPENSSL}"),
+    ("7.2", "linux", ""),
+    ("7.6", "linux", ""),
+    ("8.0", "linux", ""),
+    ("7.0", "macos", f"on macOS the kit's scripts need 7.2 or newer: {MAC}"),
+    ("7.1", "macos", f"on macOS the kit's scripts need 7.2 or newer: {MAC}"),
+    ("7.2", "macos", ""),
+    ("6.2", "macos", "the kit's scripts need 7 or newer"),
+]
+PAGES = "https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-"
+POWERSHELL_FIXES = {
+    "windows": "winget install Microsoft.PowerShell   (then run the tools with pwsh, "
+    "not powershell)",
+    "linux": f"install the current PowerShell: {PAGES}linux",
+    "macos": f"install the current PowerShell: {PAGES}macos",
+}
+
+
+def test_the_oldest_powershell_is_each_systems_own(tmp_path: Path) -> None:
+    """Every script is written for 7.0, and Windows runs them on it. On Linux 7.0 and 7.1
+    abort where they compute a checksum (they load OpenSSL 1.x): a failed check that says
+    so, not a crash in the middle of an install."""
+    root, env = _ready_project(tmp_path)
+    env = env | {"KIT_CONFIG": str(root / "tools" / "kit_config.ps1")}
+    calls = "; ".join(
+        f"'[' + (Get-KitPowerShellProblem -Version '{version}' -Platform {system}) + ']'"
+        for version, system, _ in POWERSHELLS
+    )
+    said = run_powershell(f". $env:KIT_CONFIG; {calls}", env=env)
+    assert said.returncode == 0, said.stdout + said.stderr
+    assert said.stdout.splitlines() == [f"[{problem}]" for _, _, problem in POWERSHELLS]
+
+    fixes = run_powershell(
+        ". $env:KIT_CONFIG; foreach ($system in 'windows', 'linux', 'macos') { "
+        "Get-KitPowerShellFix -Platform $system }",
+        env=env,
+    )
+    assert fixes.stdout.splitlines() == [
+        POWERSHELL_FIXES[system] for system in ("windows", "linux", "macos")
+    ]
+
+    # What a script that must not start says: one line, the version as PowerShell names
+    # it, the reason and the fix. Nothing for a PowerShell that can run it.
+    refusals = run_powershell(
+        ". $env:KIT_CONFIG; "
+        "'[' + (Get-KitPowerShellRefusal -Version ([version]'7.0.13') -Platform linux) + ']'; "
+        "'[' + (Get-KitPowerShellRefusal -Version '7.1' -Platform macos) + ']'; "
+        "'[' + (Get-KitPowerShellRefusal -Version ([version]'7.0.13') -Platform windows) + ']'; "
+        "'[' + (Get-KitPowerShellRefusal -Version ([version]'7.2.24') -Platform linux) + ']'; "
+        "'[' + (Get-KitPowerShellRefusal -Platform windows) + ']'",
+        env=env,
+    )
+    assert refusals.returncode == 0, refusals.stdout + refusals.stderr
+    assert refusals.stdout.splitlines() == [
+        f"[PowerShell 7.0.13: on Linux the kit's scripts need 7.2 or newer: {OPENSSL}. "
+        f"Fix: {POWERSHELL_FIXES['linux']}]",
+        f"[PowerShell 7.1: on macOS the kit's scripts need 7.2 or newer: {MAC}. "
+        f"Fix: {POWERSHELL_FIXES['macos']}]",
+        "[]",
+        "[]",
+        "[]",  # the PowerShell of this test, on Windows: 7.0 or newer
+    ]
+
+    # The PowerShell that runs this test passes its own system's rule, or doctor says why.
+    result = run_tool(root, "doctor.ps1", env=env)
+    version = run_powershell('$v = $PSVersionTable.PSVersion; "$($v.Major).$($v.Minor)"', env=env)
+    major, minor = (int(part) for part in version.stdout.strip().split("."))
+    if PLATFORM == "windows" or (major, minor) >= (7, 2):
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"[ok]   PowerShell {major}.{minor}." in result.stdout
+    else:
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert f"[FAIL] PowerShell {major}.{minor}." in result.stdout
+        assert f"       fix: {POWERSHELL_FIXES[PLATFORM]}" in result.stdout
+        # One failed check: the others still run.
+        assert result.stdout.count("[FAIL]") == 1 and "[ok]   kit.json" in result.stdout
+        assert "0 warning(s), 1 failed" in result.stdout
+
+
+def test_gdtoolkit_is_looked_for_where_each_system_keeps_it(tmp_path: Path) -> None:
+    root, env = _ready_project(tmp_path)
+    said = run_powershell(
+        ". $env:KIT_CONFIG; foreach ($system in 'windows', 'linux', 'macos', '') { "
+        "Get-KitVenvTool -Name gdlint -Platform $system }",
+        env=env | {"KIT_CONFIG": str(root / "tools" / "kit_config.ps1")},
+    )
+    assert said.returncode == 0, said.stdout + said.stderr
+    here = venv_tool(root, "gdlint").relative_to(root).as_posix()
+    assert said.stdout.splitlines() == [
+        ".venv/Scripts/gdlint.exe",
+        ".venv/bin/gdlint",
+        ".venv/bin/gdlint",
+        here,
+    ]
+    # A virtual environment made by another system (a Windows checkout seen from WSL, or
+    # the other way round) holds programs this one cannot start: they do not count.
+    for name in ("gdlint", "gdformat"):
+        there = venv_tool(root, name)
+        other = root / (
+            ".venv/bin/" + name if there.suffix == ".exe" else f".venv/Scripts/{name}.exe"
+        )
+        other.parent.mkdir(parents=True, exist_ok=True)
+        there.rename(other)
+    result = run_tool(root, "doctor.ps1", env=env)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "[FAIL] gdlint and gdformat not in .venv" in result.stdout
 
 
 def test_optional_parts_warn_without_failing(tmp_path: Path) -> None:
@@ -321,6 +512,7 @@ def test_mutation_left_on_is_a_warning(tmp_path: Path) -> None:
     assert off.returncode == 0 and "[warn]" not in off.stdout, off.stdout
 
 
+@windows_only("Godot's windowed .exe, a GUI-subsystem program")
 @pytest.mark.real_godot
 def test_lone_windowed_godot_is_a_warning(tmp_path: Path) -> None:
     windowed = lone_gui_godot(tmp_path / "flat")
@@ -335,6 +527,7 @@ def test_lone_windowed_godot_is_a_warning(tmp_path: Path) -> None:
     assert str(windowed) in result.stdout
 
 
+@windows_only("Windows PowerShell 5.1")
 def test_windows_powershell_5_gets_told_to_use_pwsh(tmp_path: Path) -> None:
     """doctor must run under 5.1, say what is wrong, and stop: the other checks need
     PowerShell 7 to read kit.json."""
@@ -358,6 +551,7 @@ def test_windows_powershell_5_gets_told_to_use_pwsh(tmp_path: Path) -> None:
     assert "[ok]" not in result.stdout and result.stdout.count("[FAIL]") == 1
 
 
+@windows_only("Windows PowerShell 5.1")
 @pytest.mark.parametrize(
     ("script", "code"), [("tools/setup.ps1", 1), ("tools/check.ps1", 2), ("install.ps1", 1)]
 )

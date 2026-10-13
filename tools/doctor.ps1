@@ -7,11 +7,12 @@
 #   [FAIL]  required; the tools will not work until it is fixed
 #   [warn]  optional; something is unavailable, the gates still run
 #
-# Checked: PowerShell 7, kit.json, project.godot and its strict [debug]
-# warnings, Godot (path and version), that those warnings reach the addon
-# folders in kit.json source.include, uv, gdlint/gdformat in .venv, gdUnit4
-# against the kit.json pin, the DevTools autoload and its mutation switch, the
-# class cache, AGENTS.md sample sections, git.
+# Checked: PowerShell (7.0 or newer on Windows, 7.2 or newer on Linux and
+# macOS: Get-KitPowerShellProblem), kit.json, project.godot and its strict
+# [debug] warnings, Godot (path and version), that those warnings reach the
+# addon folders in kit.json source.include, uv, gdlint/gdformat in .venv,
+# gdUnit4 against the kit.json pin, the DevTools autoload and its mutation
+# switch, the class cache, AGENTS.md sample sections, git.
 #
 # kit.json gdscript.strict = false (a project that has not adopted the strict
 # warnings): the two strict-warning checks print [warn], not [FAIL].
@@ -88,11 +89,15 @@ Write-Host "doctor: $projectRoot" -ForegroundColor Cyan
 
 # --- PowerShell ---
 $psVersion = $PSVersionTable.PSVersion
-if ($psVersion.Major -ge 7) {
+# Major.minor is all the rule reads, and all that Windows PowerShell 5.1 and
+# PowerShell 7 name alike.
+$psProblem = Get-KitPowerShellProblem -Version ([version]"$($psVersion.Major).$($psVersion.Minor)")
+if (-not $psProblem) {
     Write-Check ok "PowerShell $psVersion"
 } else {
-    Write-Check FAIL "PowerShell $psVersion (the kit's scripts need 7 or newer)" `
-        -Fix "winget install Microsoft.PowerShell   (then run the tools with pwsh, not powershell)"
+    Write-Check FAIL "PowerShell $psVersion ($psProblem)" -Fix (Get-KitPowerShellFix)
+}
+if ($psVersion.Major -lt 7) {
     Write-Host ""
     Write-Host "doctor: NOT READY: run this again with pwsh; nothing else was checked." -ForegroundColor Red
     exit 1
@@ -170,8 +175,10 @@ try {
     $reason = @($_.Exception.Message -split "`n")
     # The message's own install hint is the fix line below.
     $headline = $reason[0] -replace '(?<=not found\.) Install it with .*$', ''
-    Write-Check FAIL $headline -Fix "pwsh ./tools/install_godot.ps1   (or set GODOT_BIN to a Godot $(Get-KitGodotVersion) executable)" `
-        -Note (($reason | Select-Object -Skip 1) -join "`n       ")
+    $fix = "pwsh ./tools/install_godot.ps1   (or set GODOT_BIN to a Godot $(Get-KitGodotVersion) executable)"
+    # No official build for this machine: there is nothing to download.
+    if (-not (Get-KitGodotBuild)) { $fix = "set GODOT_BIN to a Godot $(Get-KitGodotVersion) executable" }
+    Write-Check FAIL $headline -Fix $fix -Note (($reason | Select-Object -Skip 1) -join "`n       ")
 }
 
 # --- strict warnings under res://addons ---
@@ -205,15 +212,14 @@ if ($uv) {
     Write-Check ok "$uvVersion"
 } else {
     Write-Check FAIL "uv not found (it installs and runs the Python tools)" `
-        -Fix "winget install astral-sh.uv   (or see https://docs.astral.sh/uv/)"
+        -Fix (Get-KitInstallHint uv)
 }
 
 # --- gdtoolkit ---
 $missingTools = @(
     foreach ($tool in @("gdlint", "gdformat")) {
-        $inVenv = (Test-Path -LiteralPath (Join-Path $projectRoot ".venv/Scripts/$tool.exe") -PathType Leaf) -or
-            (Test-Path -LiteralPath (Join-Path $projectRoot ".venv/bin/$tool") -PathType Leaf)
-        if (-not $inVenv) { $tool }
+        $inVenv = Join-Path $projectRoot (Get-KitVenvTool $tool)
+        if (-not (Test-Path -LiteralPath $inVenv -PathType Leaf)) { $tool }
     }
 )
 if ($missingTools.Count -eq 0) {
@@ -298,10 +304,14 @@ if (Test-Path -LiteralPath $agentsFile -PathType Leaf) {
 }
 
 # --- git ---
-if (Get-Command git -CommandType Application -ErrorAction SilentlyContinue) {
-    Write-Check ok "git"
+$needsGit = "check.ps1 -Changed and pre-commit hooks need it"
+$git = @(Get-Command git -CommandType Application -ErrorAction SilentlyContinue)
+# macOS: a git that is there may be Apple's placeholder for the Command Line Tools.
+$gitProblem = if ($git.Count -gt 0) { Get-KitGitProblem -GitPath $git[0].Source } else { "git not found" }
+if ($gitProblem) {
+    Write-Check warn "${gitProblem}: $needsGit" -Fix (Get-KitInstallHint git)
 } else {
-    Write-Check warn "git not found: check.ps1 -Changed and pre-commit hooks need it" -Fix "winget install Git.Git"
+    Write-Check ok "git"
 }
 
 Write-Host ""

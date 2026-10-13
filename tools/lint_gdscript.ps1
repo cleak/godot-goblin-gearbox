@@ -44,12 +44,8 @@ try {
 function Resolve-Tool {
     param([string]$Name)
     # The project's pinned toolchain (uv sync -> .venv) wins over PATH.
-    foreach ($candidate in @(
-            (Join-Path $projectRoot ".venv/Scripts/$Name.exe"),
-            (Join-Path $projectRoot ".venv/bin/$Name")
-        )) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
-    }
+    $candidate = Join-Path $projectRoot (Get-KitVenvTool $Name)
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
     $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if ($command) { return $command.Source }
@@ -62,9 +58,10 @@ function Invoke-GdtoolkitBatches {
         [object[]]$ToolArgs,
         [string[]]$FilePaths
     )
-    # Windows process creation has a finite command-line budget, so files go
-    # in batches of relative paths. Batches are small and run in parallel, one
-    # per core: gdtoolkit is single-threaded and slow on a large project.
+    # A command line has a finite length (32,767 characters on Windows), so
+    # files go in batches of relative paths. Batches are small and run in
+    # parallel, one per core: gdtoolkit is single-threaded and slow on a large
+    # project.
     $maxBatchChars = 12000
     $maxBatchFiles = [Math]::Max(8, [Math]::Ceiling($FilePaths.Count / [Environment]::ProcessorCount))
     $batches = [System.Collections.Generic.List[object]]::new()
@@ -86,8 +83,10 @@ function Invoke-GdtoolkitBatches {
     # Each batch returns its output and exit code. Only failing batches print,
     # in batch order; clean ones would just repeat "no problems found".
     # The first batch runs alone: gdtoolkit builds its grammar cache on a machine's first
-    # run (%LOCALAPPDATA%\gdtoolkit), and two processes building it at once fail with
-    # "Cannot create a file when that file already exists".
+    # run (%LOCALAPPDATA%\gdtoolkit on Windows, ~/.cache/gdtoolkit on Linux,
+    # ~/Library/Caches/gdtoolkit on macOS). Two processes building it at once failed on
+    # Windows: the second finds the folder the first has just made ("Cannot create a
+    # file when that file already exists"). The same code builds it on every system.
     $first = $batches[0]
     $results = @(
         try {
@@ -136,7 +135,7 @@ if (-not $gdlint -or -not $gdformat) {
 
 try {
     $files = @(Get-KitSourceFiles -Path $Path -Extensions @(".gd"))
-    $kitFiles = @(Get-KitInstalledFiles)
+    $installed = Get-KitInstalledFileSet
 } catch {
     Write-Host "GDScript lint: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
@@ -146,20 +145,23 @@ try {
 # they follow the kit's .gdlintrc, not this project's, and -Fix must not rewrite
 # them (install.ps1 would then call each one a conflict).
 $leftOut = 0
-if ($kitFiles.Count -gt 0) {
-    $installed = [System.Collections.Generic.HashSet[string]]::new(
-        [string[]]$kitFiles, [System.StringComparer]::OrdinalIgnoreCase
-    )
+if ($installed.Count -gt 0) {
     $own = @($files | Where-Object { -not $installed.Contains((ConvertTo-KitRelativePath $_.FullName)) })
     $leftOut = $files.Count - $own.Count
     $files = $own
 }
 $leftOutNote = "$leftOut kit file(s) left out: tools/kit_manifest.json lists them, and the kit's own rules cover them"
 
+# PowerShell before 7.3 hands a program its arguments unescaped: a double quote
+# in a file name (Linux and macOS allow one) would be lost on the way. Escaped
+# as the system reads a command line, it arrives.
+$escapeQuotes = $PSVersionTable.PSVersion -lt [version]"7.3"
 $paths = @(
     foreach ($file in $files) {
         # The "./" keeps a root-level -name.gd from being read as a command-line option.
-        "./" + (ConvertTo-KitRelativePath $file.FullName)
+        $relative = "./" + (ConvertTo-KitRelativePath $file.FullName)
+        if ($escapeQuotes) { $relative = $relative -replace '(\\*)"', '$1$1\"' }
+        $relative
     }
 )
 

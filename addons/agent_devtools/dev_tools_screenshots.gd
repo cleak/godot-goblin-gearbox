@@ -16,8 +16,16 @@ const DevCommand := preload("res://addons/agent_devtools/dev_command.gd")
 const DIRECTORY: String = "user://screenshots"
 ## How long wait_for_writes() waits for the asynchronous downloads.
 const READBACK_WAIT_MSEC: int = 10000
+const READBACK_LOST: String = "Screenshot readback never arrived"
 ## Frames capture() waits for a draw before it reads the viewport as it is.
 const DRAW_WAIT_FRAMES: int = 3
+## Said when the window draws no frame. Minimized on every system; macOS also draws none for
+## a window that is covered, on another Space or behind a locked screen (Godot's
+## window_can_draw() there is the window's occlusion state).
+const NOT_DRAWING: String = (
+	"Nothing to capture: the window is not drawing. It is minimized, or on macOS covered by "
+	+ "another window, on another Space, or behind a locked screen"
+)
 ## File stems Windows reserves for devices, whatever the extension.
 const WINDOWS_RESERVED_STEMS: PackedStringArray = [
 	"CON",
@@ -46,14 +54,20 @@ const WINDOWS_RESERVED_STEMS: PackedStringArray = [
 
 ## Where captures go: directory_for() of the session this game runs with.
 var directory: String = DIRECTORY
+## The background captures the last wait_for_writes() found unwritten: the file's absolute
+## path -> why. A capture() with `background` has answered "captured" for each by then.
+var unwritten: Dictionary[String, String] = {}
 
 var _host: Node = null
 ## Asynchronous downloads that have not landed yet (main thread).
 var _reads: int = 0
+## The files those downloads are for (main thread).
+var _reading: Array[String] = []
 ## Worker tasks writing a PNG (main thread).
 var _tasks: Array[int] = []
-## Failures of background captures, kept for wait_for_writes() (under _mutex).
-var _errors: Array[String] = []
+## Failures of background captures, kept for wait_for_writes(): the file's absolute path, or
+## "" when it is not known -> why, oldest first (under _mutex).
+var _errors: Dictionary[String, String] = {}
 var _mutex: Mutex = Mutex.new()
 
 
@@ -116,7 +130,7 @@ func capture(filename: String, background: bool = false) -> Dictionary:
 	if DisplayServer.get_name() == "headless" or size.x <= 0 or size.y <= 0:
 		return DevCommand.reply(false, "Nothing to capture: this run renders no frames (headless)")
 	if not DisplayServer.window_can_draw():
-		return DevCommand.reply(false, "Nothing to capture: the window is not drawing (minimized?)")
+		return DevCommand.reply(false, NOT_DRAWING)
 	await _next_draw()
 	var folder: String = ProjectSettings.globalize_path(directory)
 	if DirAccess.make_dir_recursive_absolute(folder) != OK:
@@ -138,7 +152,7 @@ func capture(filename: String, background: bool = false) -> Dictionary:
 
 
 ## Resumes once every background capture is read back and written; frames keep running
-## meanwhile. Returns the first failure, or "".
+## meanwhile. Returns the first failure, or ""; `unwritten` then names every file that failed.
 func wait_for_writes() -> String:
 	var tree: SceneTree = _host.get_tree()
 	var deadline: int = Time.get_ticks_msec() + READBACK_WAIT_MSEC
@@ -146,17 +160,22 @@ func wait_for_writes() -> String:
 		await tree.process_frame
 	if _reads > 0:
 		_reads = 0
-		_keep_error("Screenshot readback never arrived")
+		_keep_error("", READBACK_LOST)
+		for path: String in _reading:
+			_keep_error(path, READBACK_LOST)
+		_reading.clear()
 	while not _tasks.is_empty():
 		var task: int = _tasks.pop_front()
 		while not WorkerThreadPool.is_task_completed(task):
 			await tree.process_frame
 		WorkerThreadPool.wait_for_task_completion(task)
 	_mutex.lock()
-	var first: String = "" if _errors.is_empty() else _errors[0]
-	_errors.clear()
+	unwritten = _errors
+	_errors = {}
 	_mutex.unlock()
-	return first
+	for message: String in unwritten.values():
+		return message
+	return ""
 
 
 ## Waits until the frame in progress is drawn, so the capture shows the state the game is in
@@ -193,6 +212,7 @@ func _read_async(viewport_texture: RID, abs_path: String) -> bool:
 	if device == null:
 		return false
 	_reads += 1
+	_reading.append(abs_path)
 	RenderingServer.call_on_render_thread(_request.bind(device, viewport_texture, abs_path))
 	return true
 
@@ -223,8 +243,9 @@ func _request(device: RenderingDevice, viewport_texture: RID, abs_path: String) 
 ## Main thread: an asynchronous download arrived, or failed.
 func _on_read(image: Image, abs_path: String, error: String) -> void:
 	_reads -= 1
+	_reading.erase(abs_path)
 	if image == null or not error.is_empty():
-		_keep_error("Failed to read screenshot %s: %s" % [abs_path.get_file(), error])
+		_keep_error(abs_path, "Failed to read screenshot %s: %s" % [abs_path.get_file(), error])
 		return
 	_write_on_worker(image, abs_path)
 
@@ -244,12 +265,17 @@ func _save(image: Image, abs_path: String, opaque: bool) -> void:
 		image.convert(wanted)
 	var error: Error = image.save_png(abs_path)
 	if error != OK:
-		_keep_error("Failed to save screenshot %s: %s" % [abs_path.get_file(), error_string(error)])
+		_keep_error(
+			abs_path,
+			"Failed to save screenshot %s: %s" % [abs_path.get_file(), error_string(error)]
+		)
 
 
-func _keep_error(message: String) -> void:
+## Keeps the first failure of each file.
+func _keep_error(abs_path: String, message: String) -> void:
 	_mutex.lock()
-	_errors.append(message)
+	if not _errors.has(abs_path):
+		_errors[abs_path] = message
 	_mutex.unlock()
 
 

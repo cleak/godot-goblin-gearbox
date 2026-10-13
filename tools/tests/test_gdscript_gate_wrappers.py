@@ -4,30 +4,35 @@ import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 from _gate_fixtures import (
-    PWSH,
+    MACOS,
+    NEEDS_PWSH,
     REPO,
     WINDOWS,
+    bare_path,
     clean_env,
     copy_tools,
+    linux_only,
+    posix_only,
     project_godot,
+    python_program,
     real_godot,
     run_powershell,
     run_tool,
+    user_data_env,
+    venv_tool,
     write,
     write_kit_json,
 )
 
-VENV_SCRIPTS = Path(sys.executable).parent
-GDFORMAT = VENV_SCRIPTS / "gdformat.exe"
-GDLINT = VENV_SCRIPTS / "gdlint.exe"
-SYSTEM32 = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32"
+# gdtoolkit as `uv sync` installed it for this repository.
+GDFORMAT = venv_tool(REPO, "gdformat")
+GDLINT = venv_tool(REPO, "gdlint")
 
-pytestmark = pytest.mark.skipif(not WINDOWS or PWSH is None, reason="Windows PowerShell 7 gates")
+pytestmark = NEEDS_PWSH
 
 CLEAN = "extends RefCounted\n"
 INVALID = "this is invalid\n"
@@ -35,7 +40,7 @@ INVALID = "this is invalid\n"
 
 def _lint_env() -> dict[str, str]:
     """The fixture project has no .venv, so gdtoolkit comes from PATH."""
-    return clean_env(PATH=str(VENV_SCRIPTS) + os.pathsep + os.environ.get("PATH", ""))
+    return clean_env(PATH=str(GDLINT.parent) + os.pathsep + os.environ.get("PATH", ""))
 
 
 def test_pre_commit_hooks_lint_the_kits_addon_and_leave_other_addons_alone() -> None:
@@ -87,6 +92,18 @@ def _source_tree(root: Path) -> None:
     write(root / "nested" / "invalid.gd", INVALID)
 
 
+def _no_gdtoolkit_cache(folder: Path) -> tuple[dict[str, str], Path]:
+    """The variable that moves gdtoolkit's grammar cache, pointing into the empty `folder`,
+    and where gdtoolkit then builds the cache (its parser.get_cache_directory()):
+    %LOCALAPPDATA%\\gdtoolkit on Windows, ~/.cache/gdtoolkit on Linux and
+    ~/Library/Caches/gdtoolkit on macOS, where only HOME moves it."""
+    folder.mkdir(parents=True)
+    if WINDOWS:
+        return {"LOCALAPPDATA": str(folder)}, folder / "gdtoolkit"
+    caches = folder / "Library" / "Caches" if MACOS else folder / ".cache"
+    return {"HOME": str(folder)}, caches / "gdtoolkit"
+
+
 def test_lint_gate_passes_on_a_machine_that_never_ran_gdtoolkit(tmp_path: Path) -> None:
     """gdtoolkit builds its grammar cache on first use; parallel batches must not race for it."""
     assert GDFORMAT.is_file() and GDLINT.is_file(), "run uv sync"
@@ -96,15 +113,95 @@ def test_lint_gate_passes_on_a_machine_that_never_ran_gdtoolkit(tmp_path: Path) 
     write_kit_json(root)
     for index in range(64):  # several batches on any machine
         write(root / "scripts" / f"case_{index:02d}.gd", CLEAN)
-    cache = tmp_path / "no cache yet"
-    cache.mkdir()
-    env = _lint_env()
-    env["LOCALAPPDATA"] = str(cache)
+    moved, cache = _no_gdtoolkit_cache(tmp_path / "no cache yet")
+    env = _lint_env() | moved
 
     result = run_tool(root, "lint_gdscript.ps1", env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "GDScript lint + format: CLEAN" in result.stdout
-    assert list((cache / "gdtoolkit").rglob("*.pickle")), "the cache was not built where expected"
+    assert list(cache.rglob("*.pickle")), "the cache was not built where expected"
+
+
+# Stands in for gdformat and gdlint: says when it started and when it ended, in files of
+# its own. (Lines added to one file by several processes at once can be lost on Windows.)
+BATCH = """import os
+import time
+
+
+def note(text):
+    name = os.path.splitext(os.path.basename(__file__))[0]
+    mine = "%s.%d.%s" % (name, os.getpid(), text)
+    with open(os.path.join(os.environ["KIT_BATCH_LOG"], mine), "w", encoding="ascii") as log:
+        log.write(str(time.time_ns()))
+
+
+note("start")
+time.sleep(0.5)
+note("end")
+"""
+
+
+def test_the_first_batch_of_each_tool_runs_alone(tmp_path: Path) -> None:
+    """Whatever a tool builds on its first run, no second process is there to build it too.
+    The race for gdtoolkit's cache is rare, and a rare failure is no test: stand-ins say
+    when each batch started and ended."""
+    root = tmp_path / "project"
+    copy_tools(root, "lint_gdscript.ps1")
+    write_kit_json(root)
+    for index in range(64):  # a batch for every core, of eight files or more
+        write(root / "scripts" / f"case_{index:02d}.gd", CLEAN)
+    for tool in ("gdformat", "gdlint"):
+        python_program(tmp_path / "bin", tool, BATCH)
+    log = tmp_path / "batches"
+    log.mkdir()
+    env = clean_env(PATH=bare_path(tmp_path / "bin"), KIT_BATCH_LOG=str(log))
+
+    result = run_tool(root, "lint_gdscript.ps1", env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    for tool in ("gdformat", "gdlint"):
+        batches: dict[str, dict[str, int]] = {}
+        for path in log.glob(f"{tool}.*"):
+            _, process, moment = path.name.split(".")
+            batches.setdefault(process, {})[moment] = int(path.read_text(encoding="ascii"))
+        assert batches and all(set(batch) == {"start", "end"} for batch in batches.values()), (
+            batches
+        )
+        first = min(batches.values(), key=lambda batch: batch["start"])
+        # With three cores or more the batches after the first start side by side.
+        later = [batch["start"] for batch in batches.values() if batch is not first]
+        assert all(first["end"] <= start for start in later), batches
+
+
+# Stands in for gdformat and gdlint: one line for each argument it was given.
+ARGUMENTS = """import os
+import sys
+
+with open(os.environ["KIT_ARGUMENTS_LOG"], "a", encoding="utf-8") as log:
+    for argument in sys.argv[1:]:
+        log.write(argument + "\\n")
+"""
+
+
+@posix_only("a double quote in a file name")
+def test_a_file_name_reaches_the_tools_as_it_is(tmp_path: Path) -> None:
+    """PowerShell before 7.3 hands a program its arguments unescaped: the quote was lost
+    and the tool looked for another file. (Run under 7.2 to see the difference.)"""
+    root = tmp_path / "project"
+    copy_tools(root, "lint_gdscript.ps1")
+    write_kit_json(root)
+    names = ['say "hi".gd', 'quote"alone.gd', "it's here.gd", "plain.gd"]
+    for name in names:
+        write(root / "scripts" / name, CLEAN)
+    for tool in ("gdformat", "gdlint"):
+        python_program(tmp_path / "bin", tool, ARGUMENTS)
+    log = tmp_path / "arguments.log"
+    env = clean_env(PATH=bare_path(tmp_path / "bin"), KIT_ARGUMENTS_LOG=str(log))
+
+    result = run_tool(root, "lint_gdscript.ps1", env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    given = log.read_text(encoding="utf-8").splitlines()
+    for name in names:
+        assert given.count(f"./scripts/{name}") == 2, (name, given)  # gdformat, then gdlint
 
 
 def test_lint_gate_picks_authored_files_and_batches_long_argv(tmp_path: Path) -> None:
@@ -164,7 +261,8 @@ def test_lint_gate_picks_authored_files_and_batches_long_argv(tmp_path: Path) ->
     assert fixed.returncode == 1, fixed.stdout + fixed.stderr  # formatted; the name still fails
     assert "\tpass" in (long_dir / "case_000.gd").read_text()
     assert "Lint issues found" in fixed.stdout
-    # gdformat on Windows writes CRLF; a file that had LF endings still has them.
+    # gdformat on Windows writes CRLF; a file that had LF endings still has them, there
+    # and everywhere.
     assert b"\r" not in (long_dir / "case_000.gd").read_bytes()
 
 
@@ -190,7 +288,7 @@ def test_lint_gate_fails_loudly_on_nothing_to_lint(tmp_path: Path) -> None:
     assert outside.returncode == 1 and "outside the project" in outside.stdout
 
     # Without gdtoolkit the gate reports the missing tool; it does not pass.
-    bare = run_tool(root, "lint_gdscript.ps1", env=clean_env(PATH=str(SYSTEM32)))
+    bare = run_tool(root, "lint_gdscript.ps1", env=clean_env(PATH=bare_path()))
     assert bare.returncode == 2, bare.stdout + bare.stderr
     assert "uv sync" in bare.stdout
 
@@ -219,8 +317,10 @@ def test_lint_gate_leaves_the_kits_installed_files_to_the_kits_rules(tmp_path: P
     assert "kit_tool.gd:3: Error: Max allowed line length (80) exceeded" in alone.stdout
     assert "would reformat ./tools/Kit_Format.gd" in alone.stdout
 
-    # Installed: the manifest's files are left out, by name, whatever their letter case.
-    manifest = {"files": {"tools/kit_tool.gd": "0", "tools/kit_format.gd": "0", "tools/x.ps1": "0"}}
+    # Installed: the manifest's files are left out, by name. Windows ignores the letter
+    # case of a name; on Linux and macOS another letter case is another file.
+    spelled = "tools/kit_format.gd" if WINDOWS else "tools/Kit_Format.gd"
+    manifest = {"files": {"tools/kit_tool.gd": "0", spelled: "0", "tools/x.ps1": "0"}}
     write(root / "tools" / "kit_manifest.json", json.dumps(manifest))
     installed = run_tool(root, "lint_gdscript.ps1", env=env)
     assert installed.returncode == 0, installed.stdout + installed.stderr
@@ -259,6 +359,27 @@ def test_lint_gate_leaves_the_kits_installed_files_to_the_kits_rules(tmp_path: P
         assert "Linting" not in broken.stdout and broken.stderr.strip() == ""
 
 
+@linux_only("a folder that holds a.gd beside A.gd")
+def test_a_file_named_like_a_kit_file_in_another_letter_case_is_the_projects_own(
+    tmp_path: Path,
+) -> None:
+    assert GDFORMAT.is_file() and GDLINT.is_file(), "run uv sync"
+    root = tmp_path / "project"
+    copy_tools(root, "lint_gdscript.ps1")
+    write_kit_json(root)
+    write(root / ".gdlintrc", "max-line-length: 80\n")
+    write(root / "tools" / "kit_tool.gd", LONG_LINE)
+    write(root / "tools" / "Kit_Tool.gd", LONG_LINE)
+    write(root / "tools" / "kit_manifest.json", json.dumps({"files": {"tools/kit_tool.gd": "0"}}))
+    result = run_tool(root, "lint_gdscript.ps1", env=_lint_env())
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert (
+        "Linting 1 GDScript file(s)" in result.stdout and "1 kit file(s) left out" in result.stdout
+    )
+    assert "Kit_Tool.gd:3: Error: Max allowed line length (80) exceeded" in result.stdout
+    assert "kit_tool.gd:3" not in result.stdout
+
+
 # The checker and what it is built on. They sit in the project's tools/ folder, so they
 # are authored files too and every count below includes them.
 TYPE_TOOLS = ("typecheck.gd", "headless_tool.gd", "error_capture.gd", "kit_config.gd")
@@ -280,7 +401,8 @@ def _type_project(
     copy_tools(root, "typecheck.ps1", *TYPE_TOOLS)
     settings = project_godot(autoloads=autoloads, strict=strict, directory_rules=directory_rules)
     write(root / "project.godot", settings)
-    return clean_env(GODOT_BIN=godot)
+    # Godot keeps a log under user://: not among the developer's own.
+    return clean_env(GODOT_BIN=godot, **user_data_env(root.parent / "user data"))
 
 
 @pytest.mark.real_godot

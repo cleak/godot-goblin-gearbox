@@ -348,11 +348,21 @@ func sweep_results(kept_seconds: int = RESULT_KEPT_SECONDS) -> int:
 	return removed
 
 
+## Every file in `folder`, hidden ones included. On Linux and macOS a name that begins with
+## "." is hidden and DirAccess.get_files_at leaves it out; a temporary file has such a name.
+static func files_in(folder: String) -> PackedStringArray:
+	var directory: DirAccess = DirAccess.open(folder)
+	if directory == null:
+		return PackedStringArray()
+	directory.include_hidden = true
+	return directory.get_files()
+
+
 ## The files in `folder`, which is created again if someone removed it while the game runs.
 func _files_in(folder: String) -> PackedStringArray:
 	if not DirAccess.dir_exists_absolute(folder):
 		DirAccess.make_dir_recursive_absolute(folder)
-	return DirAccess.get_files_at(folder)
+	return files_in(folder)
 
 
 func _post(entry: Entry) -> void:

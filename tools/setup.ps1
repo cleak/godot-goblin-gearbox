@@ -13,7 +13,9 @@
 #   4. pre-commit install   with -PreCommit, inside a git repository
 #   5. tools/doctor.ps1     the verdict
 #
-# Exit codes: 0 = ready, 1 = a step failed or doctor found a problem.
+# Exit codes: 0 = ready, 1 = a step failed or doctor found a problem. On a
+# PowerShell the scripts cannot run on (Get-KitPowerShellProblem) no step runs:
+# one line says why and names the fix.
 #
 # No "#Requires -Version 7" on purpose: started from Windows PowerShell 5.1 this
 # script says to use pwsh in one line (the stock refusal is five and names no fix).
@@ -33,6 +35,14 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "godot_resolver.ps1")
 . (Join-Path $PSScriptRoot "class_cache.ps1")
+
+# Before anything is installed: a PowerShell that cannot compute a checksum
+# aborts in the middle of the Godot install.
+$refusal = Get-KitPowerShellRefusal
+if ($refusal) {
+    Write-Host "setup: $refusal" -ForegroundColor Red
+    exit 1
+}
 
 $projectRoot = Get-KitRoot
 try {
@@ -68,8 +78,7 @@ function Invoke-InProject {
 Write-Step "uv sync"
 $uvCommand = Get-Command uv -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $uvCommand) {
-    Write-Host "uv not found. Install it (winget install astral-sh.uv, or https://docs.astral.sh/uv/) and run setup again." `
-        -ForegroundColor Red
+    Write-Host "uv not found. Fix: $(Get-KitInstallHint uv)   Then run setup again." -ForegroundColor Red
     $problems += "uv is not installed"
 } else {
     $code = Invoke-InProject $uvCommand.Source @("sync")

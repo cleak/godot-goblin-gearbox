@@ -2,10 +2,9 @@
 
 from pathlib import Path
 
-import pytest
-from _gate_fixtures import PWSH, copy_tools, run_tool
+from _gate_fixtures import NEEDS_PWSH, copy_tools, run_tool
 
-pytestmark = pytest.mark.skipif(PWSH is None, reason="PowerShell 7 (pwsh) is not installed")
+pytestmark = NEEDS_PWSH
 
 PROJECT = (
     "config_version=5\n\n[application]\n\n"

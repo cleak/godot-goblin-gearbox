@@ -3,14 +3,21 @@ groups) and select_suites.py (which suites a change can affect)."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
+import _processes
 import pytest
+from _gate_fixtures import LINUX, linux_only, posix_only, windows_only
+from _processes import alive, wait_gone
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
@@ -53,12 +60,12 @@ def test_a_slot_held_by_another_process_is_freed_when_it_dies(tmp_path: Path) ->
         group = slot_pool.ProcessGroup.launch(
             [sys.executable, "-c", holder, str(TOOLS / "ci"), str(slots)], stdout=out
         )
-    pool = slot_pool.SlotPool(1, slots)
     try:
         deadline = time.monotonic() + 20
         while not said.read_text().strip() and time.monotonic() < deadline:
             time.sleep(0.1)
         assert said.read_text().strip() == "held"
+        pool = slot_pool.SlotPool(1, slots)
         assert pool.try_acquire() is None and pool.held() == 1
     finally:
         group.kill()
@@ -97,98 +104,609 @@ def test_a_bad_slot_count_is_an_error_not_a_guess(value: str) -> None:
         slot_pool.default_slot_count({"GODOT_TEST_SLOTS": value})
 
 
-def test_the_slot_folder_is_shared_by_every_project_on_the_machine(tmp_path: Path) -> None:
-    assert slot_pool.slot_directory({}).name == "godot_test_slots"
-    assert slot_pool.slot_directory({"GODOT_TEST_SLOT_DIR": str(tmp_path)}) == tmp_path
+def test_the_slot_folder_is_one_for_every_run_on_the_machine(tmp_path: Path, monkeypatch) -> None:
+    named = {"GODOT_TEST_SLOT_DIR": str(tmp_path / "named")}
+    for platform in ("windows", "linux", "macos"):
+        assert slot_pool.slot_directory(named, platform) == tmp_path / "named"
+    # A session with a temp folder of its own: an agent's sandbox, or any user of a Mac.
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(tempfile, "tempdir", None)  # what tempfile remembers of the old one
+    assert Path(tempfile.gettempdir()) == tmp_path
+    # Windows has no temp folder that every user shares: the pool is this user's.
+    assert slot_pool.slot_directory({}, "windows") == tmp_path / "godot_test_slots"
+    # Linux and macOS have one, and with two folders two runs would each think the
+    # machine is theirs.
+    for platform in ("linux", "macos"):
+        assert slot_pool.slot_directory({}, platform) == Path("/tmp") / "godot_test_slots"
+    here = "windows" if os.name == "nt" else "linux"
+    assert slot_pool.slot_directory({}) == slot_pool.slot_directory({}, here)
 
 
+@pytest.mark.parametrize("named", ["slots", "./slots", "../slots"])
+def test_a_relative_slot_folder_is_refused(named: str) -> None:
+    """It would be one folder per working folder: two runs would not share it."""
+    for platform in ("windows", "linux", "macos"):
+        with pytest.raises(slot_pool.SlotError) as said:
+            slot_pool.slot_directory({"GODOT_TEST_SLOT_DIR": named}, platform)
+        assert str(said.value) == (
+            "GODOT_TEST_SLOT_DIR must be an absolute path, so that every test run on this "
+            f"machine finds the same folder; it is '{named}'"
+        )
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+@posix_only("permission bits, which decide whether another user's run can take a slot")
+def test_a_folder_the_pool_makes_is_open_to_every_user(tmp_path: Path) -> None:
+    made = tmp_path / "shared" / "slots"
+    private = os.umask(0o077)  # a user whose files are closed to everyone else
+    try:
+        slot = slot_pool.SlotPool(1, made).try_acquire()
+        # The lock of a project's import lives in a folder of the pool's folder, and may
+        # be the first thing a run makes there.
+        slot_pool.SlotPool(1, tmp_path / "pool" / "import_0123")
+    finally:
+        os.umask(private)
+    assert slot is not None
+    # Like /tmp: anyone may add a lock file, nobody may delete another user's.
+    assert _mode(made) == 0o1777
+    assert _mode(made / "slot_0.lock") == 0o644
+    slot.release()
+    # Every folder made on the way is as open: another user's run adds its files there.
+    for folder in (made.parent, tmp_path / "pool", tmp_path / "pool" / "import_0123"):
+        assert _mode(folder) == 0o1777, folder
+    # A folder that is already there is its owner's: its mode stays.
+    mine = tmp_path / "mine"
+    mine.mkdir(mode=0o700)
+    slot_pool.SlotPool(1, mine)
+    assert _mode(mine) == 0o700
+    assert _mode(tmp_path) != 0o1777
+
+
+def test_every_slot_is_tried_when_the_pool_is_made(tmp_path: Path) -> None:
+    """A slot that cannot be opened is found before the first shard starts (exit 2 in
+    tools/test_shards.py), not when the second shard asks for it."""
+    (tmp_path / "slot_1.lock").mkdir()
+    slot_pool.SlotPool(1, tmp_path)
+    with pytest.raises(slot_pool.SlotError, match="cannot use the test slot folder"):
+        slot_pool.SlotPool(2, tmp_path)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["slot_0.lock", "slot_1.lock"]
+
+
+@posix_only("permission bits, which decide whether another user's run can take a slot")
+def test_a_lock_file_this_user_may_only_read_can_be_taken(tmp_path: Path) -> None:
+    """What another user's lock file looks like from here: readable, in a folder where
+    this run may still create its own."""
+    if os.geteuid() == 0:
+        pytest.skip("root may write every file")
+    slot_pool.SlotPool(1, tmp_path)
+    lock = tmp_path / "slot_0.lock"
+    lock.chmod(0o444)
+    tmp_path.chmod(0o555)
+    try:
+        slot = slot_pool.SlotPool(1, tmp_path).try_acquire()
+        assert slot is not None
+        assert slot_pool.SlotPool(1, tmp_path).try_acquire() is None
+        slot.release()
+        # A slot whose file is missing cannot be added to a folder that is closed.
+        with pytest.raises(slot_pool.SlotError, match="cannot use the test slot folder"):
+            slot_pool.SlotPool(2, tmp_path).held()
+    finally:
+        tmp_path.chmod(0o755)
+
+
+def test_a_slot_folder_that_cannot_be_used_is_one_line_with_the_fix(tmp_path: Path) -> None:
+    blocked = tmp_path / "a_file"
+    blocked.write_text("", encoding="utf-8")
+    with pytest.raises(slot_pool.SlotError) as said:
+        slot_pool.SlotPool(1, blocked)
+    message = str(said.value)
+    assert message.startswith(f"cannot use the test slot folder {blocked}: ")
+    assert "Fix: make it writable, or set GODOT_TEST_SLOT_DIR to a folder" in message
+    assert "\n" not in message
+    # An error of the run's setup (exit 2 in tools/test_shards.py), not a crash.
+    assert isinstance(said.value, RuntimeError)
+
+
+@posix_only("a folder every user may write to, where a lock file may be somebody's link")
+def test_a_lock_file_is_never_opened_through_a_link(tmp_path: Path) -> None:
+    slots = tmp_path / "slots"
+    slots.mkdir()
+    for target in (tmp_path / "missing", tmp_path / "theirs"):
+        (slots / "slot_0.lock").symlink_to(target)
+        with pytest.raises(slot_pool.SlotError, match="cannot use the test slot folder"):
+            slot_pool.SlotPool(1, slots)
+        assert not (tmp_path / "missing").exists()
+        (slots / "slot_0.lock").unlink()
+        (tmp_path / "theirs").write_text("kept", encoding="utf-8")
+    assert (tmp_path / "theirs").read_text(encoding="utf-8") == "kept"
+
+
+@posix_only("a folder that cannot lock, such as some network shares")
+def test_a_folder_that_cannot_lock_is_an_error_not_a_slot_that_looks_taken(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Read as "taken", the run would wait an hour for a slot nobody holds."""
+    pool = slot_pool.SlotPool(1, tmp_path)
+
+    def refuse(_handle: int, _operation: int) -> None:
+        raise OSError(9, "Bad file descriptor")
+
+    monkeypatch.setattr(slot_pool.fcntl, "flock", refuse)
+    with pytest.raises(slot_pool.SlotError) as said:
+        pool.try_acquire()
+    lock = tmp_path / "slot_0.lock"
+    assert str(said.value) == (
+        f"cannot lock {lock}: Bad file descriptor. Fix: set GODOT_TEST_SLOT_DIR to a folder "
+        "on a local disk"
+    )
+    # Found when the pool is made: before the first shard starts (exit 2), not after.
+    with pytest.raises(slot_pool.SlotError, match="cannot lock"):
+        slot_pool.SlotPool(1, tmp_path)
+
+
+IDLE = "import time; time.sleep(60)"
 BURN = "sum(range(2*10**7)); import time; time.sleep(60)"
-SPAWN_AND_WAIT = (
+SPAWN = (
     "import subprocess, sys, time;"
-    f"child = subprocess.Popen([sys.executable, '-c', {BURN!r}]);"
+    "child = subprocess.Popen([sys.executable, '-c', {program!r}]{how});"
     "print(child.pid, flush=True);"
+)
+# A program that starts another and waits: a launcher and its engine.
+SPAWN_AND_WAIT = SPAWN.format(program=BURN, how="") + "time.sleep(60)"
+# The same, but what it starts leads a session of its own, as every program does that
+# Godot's OS.create_process starts on Linux and macOS: no process group holds both.
+# (Windows has no sessions: there this is SPAWN_AND_WAIT.)
+SPAWN_APART_AND_WAIT = SPAWN.format(program=BURN, how=", start_new_session=True") + "time.sleep(60)"
+# A program that starts another and ends: what it started is left running.
+SPAWN_AND_LEAVE = SPAWN.format(program=IDLE, how="")
+# The same, in a session of its own: what a suite leaves that called OS.create_process.
+APART = ", start_new_session=True"
+SPAWN_APART_AND_LEAVE = SPAWN.format(program=IDLE, how=APART)
+# A program that waits, and whose child started another and ended: nobody is the parent
+# of that one any more, and no process group holds it.
+SPAWN_AN_ORPHAN_AND_WAIT = (
+    "import subprocess, sys, time;"
+    f"subprocess.run([sys.executable, '-c', {SPAWN_APART_AND_LEAVE!r}]);"
     "time.sleep(60)"
+)
+TREES = pytest.mark.parametrize(
+    "program",
+    [
+        SPAWN_AND_WAIT,
+        SPAWN_APART_AND_WAIT,
+        pytest.param(
+            SPAWN_AN_ORPHAN_AND_WAIT,
+            marks=linux_only("/proc/<id>/environ, which says what a process was started with"),
+        ),
+    ],
+    ids=["in its group", "in its own session", "after its parent ended"],
 )
 
 
-def _alive(pid: int) -> bool:
-    if os.name == "nt":
-        listing = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, check=False
-        )
-        return str(pid) in listing.stdout
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
-
-
-def _wait_gone(pid: int, seconds: float = 20.0) -> bool:
+def _first_number(log: Path, seconds: float = 20.0) -> int:
+    """The process id a test program printed into `log` as its first word."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        if not _alive(pid):
-            return True
-        time.sleep(0.2)
-    return False
+        words = log.read_text(encoding="utf-8", errors="replace").split() if log.is_file() else []
+        if words:
+            return int(words[0])
+        time.sleep(0.1)
+    raise AssertionError(f"nothing was written to {log} in {seconds:g} s")
 
 
-def test_a_process_group_counts_and_kills_the_whole_tree(tmp_path: Path) -> None:
-    log = tmp_path / "out.txt"
+def _launch(program: str, log: Path, **options: object) -> slot_pool.ProcessGroup:
     with log.open("wb") as out:
-        group = slot_pool.ProcessGroup.launch(
-            [sys.executable, "-c", SPAWN_AND_WAIT], stdout=out, stderr=subprocess.DEVNULL
+        return slot_pool.ProcessGroup.launch(
+            [sys.executable, "-c", program], stdout=out, stderr=subprocess.DEVNULL, **options
         )
-    grandchild = 0
+
+
+@TREES
+def test_a_process_group_kills_the_whole_tree(tmp_path: Path, program: str) -> None:
+    group = _launch(program, tmp_path / "out.txt")
     try:
-        deadline = time.monotonic() + 20
-        while not log.read_text().strip() and time.monotonic() < deadline:
-            time.sleep(0.1)
-        grandchild = int(log.read_text().split()[0])
-        if os.name == "nt":
-            while (group.cpu_seconds() or 0.0) < 0.05 and time.monotonic() < deadline:
-                time.sleep(0.2)
-            # The grandchild's CPU is counted: it was in the job from its first instruction.
-            assert (group.cpu_seconds() or 0.0) >= 0.05
-        assert group.process.poll() is None
+        grandchild = _first_number(tmp_path / "out.txt")
+        assert group.process.poll() is None and alive(grandchild)
     finally:
         group.kill()
         group.close()
     assert group.process.poll() is not None
-    if os.name == "nt":
-        assert _wait_gone(grandchild), "the grandchild outlived its group"
+    assert wait_gone(grandchild), "the grandchild outlived its group"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="job objects are a Windows mechanism")
-def test_killing_the_runner_takes_its_godot_processes_with_it(tmp_path: Path) -> None:
-    # A runner that starts a group and is then killed outright (an agent's timeout).
-    runner = (
-        "import sys, time; sys.path.insert(0, sys.argv[1]); import slot_pool;"
-        f"group = slot_pool.ProcessGroup.launch([sys.executable, '-c', {SPAWN_AND_WAIT!r}],"
-        " stdout=open(sys.argv[2], 'wb'));"
-        "print(group.process.pid, flush=True); time.sleep(60)"
+@pytest.mark.parametrize(
+    "program",
+    [
+        SPAWN_AND_LEAVE,
+        pytest.param(
+            SPAWN_APART_AND_LEAVE,
+            marks=linux_only("/proc/<id>/environ, which says what a process was started with"),
+        ),
+    ],
+    ids=["in its group", "in its own session"],
+)
+def test_closing_a_group_ends_what_its_program_left_running(tmp_path: Path, program: str) -> None:
+    """A program that starts a server and forgets it: when it has ended, the server must
+    too. In its own session is where Godot's OS.create_process puts what a suite starts;
+    there macOS cannot find it once its parent has ended."""
+    group = _launch(program, tmp_path / "out.txt")
+    named: list[str] = []
+    try:
+        assert group.process.wait(timeout=30) == 0
+        left = _first_number(tmp_path / "out.txt")
+        assert alive(left)
+    finally:
+        named = group.close()
+    assert wait_gone(left), "what the program started outlived its group"
+    # Linux can say what was left: the runner prints it.
+    assert [line.split()[0] for line in named] == ([str(left)] if LINUX else [])
+    assert all("time.sleep(60)" in line for line in named)
+    assert group.close() == []
+
+
+@posix_only("sessions, which put a process outside its parent's process group")
+def test_a_tree_is_ended_through_its_parents_alone(tmp_path: Path) -> None:
+    """All macOS has: no mark is read there. So this tree is started without one."""
+    with (tmp_path / "out.txt").open("wb") as out:
+        leader = subprocess.Popen(
+            [sys.executable, "-c", SPAWN_APART_AND_WAIT], stdout=out, start_new_session=True
+        )
+    apart = 0
+    try:
+        apart = _first_number(tmp_path / "out.txt")
+        assert alive(apart) and os.getsid(apart) != os.getsid(leader.pid)
+        slot_pool.end_tree(leader.pid, running=True)
+        assert leader.wait(timeout=20) == -signal.SIGKILL
+        assert wait_gone(apart), "what left the group outlived the tree"
+    finally:
+        leader.kill()
+        leader.wait()
+        if apart and alive(apart):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(apart, signal.SIGKILL)
+
+
+@linux_only("/proc/<id>/stat, which says that a process has ended")
+def test_a_process_that_ends_while_it_is_looked_at_is_gone(monkeypatch) -> None:
+    """Between the signal that finds it and the read of its state, its parent may have
+    waited for it: then nothing is there to read, and it is not running."""
+    monkeypatch.setattr(_processes.os, "kill", lambda _process, _signal: None)
+    assert not alive(2**22 + 7)  # above the largest process id Linux gives out
+
+
+@posix_only("sessions, which put a process outside its parent's process group")
+def test_a_killed_group_takes_what_left_it_where_no_mark_is_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """As on macOS: with nothing found by mark, a kill still ends the whole tree."""
+    monkeypatch.setattr(slot_pool, "marked", lambda *_: {})
+    group = _launch(SPAWN_APART_AND_WAIT, tmp_path / "out.txt")
+    try:
+        apart = _first_number(tmp_path / "out.txt")
+        assert alive(apart)
+    finally:
+        group.kill()
+        assert group.close() == []
+    assert wait_gone(apart), "what left the group outlived it"
+
+
+@posix_only("the watchdog process, which a job object makes needless on Windows")
+def test_the_watchdog_ends_the_trees_it_was_told_of_and_no_other(tmp_path: Path) -> None:
+    """What a run writes to its watchdog, and what that does when the run is gone. The
+    trees carry no mark, as on macOS: each is found through its parents alone."""
+    started = []
+    for name in ("told", "ended", "never_told"):
+        with (tmp_path / f"{name}.txt").open("wb") as out:
+            started.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", SPAWN_APART_AND_WAIT], stdout=out, start_new_session=True
+                )
+            )
+    told, ended, never_told = started
+    watchdog = subprocess.Popen(
+        [sys.executable, "-I", "-S", str(TOOLS / "ci" / "slot_pool.py"), "--watch"],
+        stdin=subprocess.PIPE,
     )
+    try:
+        apart = _first_number(tmp_path / "told.txt")
+        assert watchdog.stdin is not None
+        watchdog.stdin.write(b"+%d 0123abcd\n+%d 4567ef\n-%d\n" % (told.pid, ended.pid, ended.pid))
+        watchdog.stdin.flush()
+        assert not wait_gone(told.pid, seconds=0.5), "killed while its run was alive"
+        watchdog.stdin.close()  # the run is gone
+        assert watchdog.wait(timeout=30) == 0
+        assert told.wait(timeout=20) == -signal.SIGKILL
+        assert wait_gone(apart), "what left the group outlived its run"
+        assert ended.poll() is None and never_told.poll() is None
+    finally:
+        watchdog.kill()
+        watchdog.wait()
+        for process in started:
+            if process.poll() is None:
+                slot_pool.end_tree(process.pid, running=True)
+            process.wait()
+
+
+def test_a_program_that_leaves_nothing_is_closed_without_a_word(tmp_path: Path) -> None:
+    for program in ("pass", IDLE):
+        group = _launch(program, tmp_path / "out.txt")
+        if program == "pass":
+            assert group.process.wait(timeout=30) == 0
+        else:
+            group.kill()  # what a kill ends was not left by a program that ended
+        assert group.close() == []
+
+
+def test_a_process_is_found_by_the_mark_it_was_started_with(tmp_path: Path) -> None:
+    """macOS is never run here: it has no /proc, and nothing is found there."""
+    mark = "0123456789abcdef"
+    env = os.environ | {slot_pool.MARK_VARIABLE: mark}
+    ours = subprocess.Popen([sys.executable, "-c", IDLE], env=env)
+    other = subprocess.Popen([sys.executable, "-c", IDLE], env=env | {"UNRELATED": mark})
+    stranger = subprocess.Popen(
+        [sys.executable, "-c", IDLE], env=env | {slot_pool.MARK_VARIABLE: mark + "0"}
+    )
+    try:
+        deadline = time.monotonic() + 20
+        found = slot_pool.marked(mark)
+        while LINUX and len(found) < 2 and time.monotonic() < deadline:
+            time.sleep(0.1)  # between fork and exec a child still shows its parent's
+            found = slot_pool.marked(mark)
+        assert set(found) == ({ours.pid, other.pid} if LINUX else set())
+        assert all("time.sleep(60)" in command for command in found.values())
+        assert slot_pool.marked(mark, "macos") == {} and slot_pool.marked(mark, "windows") == {}
+        slot_pool.end_marked(mark)
+        if LINUX:
+            assert ours.wait(timeout=20) != 0 and other.wait(timeout=20) != 0
+        assert stranger.poll() is None
+    finally:
+        for process in (ours, other, stranger):
+            process.kill()
+            process.wait()
+
+
+@windows_only("job objects, which count the CPU of a tree while it runs")
+def test_a_job_counts_the_cpu_of_the_whole_tree(tmp_path: Path) -> None:
+    group = _launch(SPAWN_AND_WAIT, tmp_path / "out.txt")
+    try:
+        _first_number(tmp_path / "out.txt")
+        deadline = time.monotonic() + 20
+        while (group.cpu_seconds() or 0.0) < 0.05 and time.monotonic() < deadline:
+            time.sleep(0.2)
+        # The grandchild's CPU is counted: it was in the job from its first instruction.
+        assert (group.cpu_seconds() or 0.0) >= 0.05
+    finally:
+        group.kill()
+        group.close()
+
+
+@posix_only("getrusage, which counts the CPU of children once they have ended")
+def test_the_cpu_of_an_ended_group_is_counted(tmp_path: Path) -> None:
+    before = slot_pool.children_cpu_seconds()
+    assert before is not None
+    group = _launch("sum(range(2*10**7))", tmp_path / "out.txt")
+    try:
+        assert group.cpu_seconds() is None  # nothing counts a running tree here
+        assert group.process.wait(timeout=60) == 0
+    finally:
+        group.close()
+    assert (slot_pool.children_cpu_seconds() or 0.0) - before >= 0.05
+
+
+@posix_only("nice values")
+def test_a_low_priority_group_is_ten_steps_nicer_than_the_run(tmp_path: Path) -> None:
+    own = os.getpriority(os.PRIO_PROCESS, 0)
+    low = _launch(SPAWN_AND_WAIT, tmp_path / "low.txt", low_priority=True)
+    plain = _launch(IDLE, tmp_path / "plain.txt")
+    try:
+        grandchild = _first_number(tmp_path / "low.txt")
+        wanted = min(19, own + slot_pool.POSIX_NICE)
+        assert os.getpriority(os.PRIO_PROCESS, low.process.pid) == wanted
+        # What it starts is as nice as it is.
+        assert os.getpriority(os.PRIO_PROCESS, grandchild) == wanted
+        assert os.getpriority(os.PRIO_PROCESS, plain.process.pid) == own
+    finally:
+        for group in (low, plain):
+            group.kill()
+            group.close()
+
+
+@posix_only("a list of every process and its parent, which finds what left a group")
+def test_the_list_of_processes_is_read_the_same_on_linux_and_macos() -> None:
+    """Linux reads /proc and macOS asks ps; where both are there they must agree."""
+    child = subprocess.Popen([sys.executable, "-c", IDLE])
+    try:
+        for platform in ("linux", "macos"):
+            parents = slot_pool.process_parents(platform)
+            assert parents[os.getpid()] == os.getppid(), platform
+            assert parents[child.pid] == os.getpid(), platform
+            assert child.pid in slot_pool.descendants(os.getpid(), parents), platform
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_macos_is_asked_for_its_processes_in_the_form_its_ps_reads(monkeypatch) -> None:
+    """macOS is never run here: what its `ps` is asked and what it answers are pinned.
+    POSIX gives each column an -o of its own once a title is set: after "=" the rest of
+    the argument, commas too, is that title (BSD `ps` holds to it, Linux's does not)."""
+    asked: list[list[str]] = []
+
+    def ps(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        asked.append(command)
+        listing = "    1     0\n  345     1\n 6789   345\n\nnot a row\n"
+        return subprocess.CompletedProcess(command, 0, listing, "")
+
+    monkeypatch.setattr(slot_pool.subprocess, "run", ps)
+    monkeypatch.setattr(slot_pool, "ps_program", lambda: "/bin/ps")
+    assert slot_pool.process_parents("macos") == {1: 0, 345: 1, 6789: 345}
+    assert asked == [["/bin/ps", "-A", "-o", "pid=", "-o", "ppid="]]
+
+
+def test_macos_ps_is_found_without_path_and_its_absence_cuts_no_kill_short(
+    monkeypatch, capsys
+) -> None:
+    """A run started with a PATH of its own (no /bin) found no `ps`: the kill of a timed-out
+    shard ended in FileNotFoundError and a traceback. /bin/ps is asked where it is, and a
+    `ps` that cannot be started is one line: the group is killed all the same."""
+    assert slot_pool.ps_program(lambda path: path == "/bin/ps") == "/bin/ps"
+    assert slot_pool.ps_program(lambda _path: False) == "ps"
+
+    def no_ps(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(2, "No such file or directory", command[0])
+
+    signals: list[tuple[int, int, bool]] = []
+    monkeypatch.setattr(slot_pool.subprocess, "run", no_ps)
+    monkeypatch.setattr(slot_pool, "ps_program", lambda: "ps")
+    monkeypatch.setattr(
+        slot_pool,
+        "_signal",
+        lambda process, number, group=False: signals.append((process, number, group)),
+    )
+    monkeypatch.setattr(slot_pool.signal, "SIGSTOP", 19, raising=False)
+    monkeypatch.setattr(slot_pool.signal, "SIGKILL", 9, raising=False)
+    assert slot_pool.process_parents("macos") == {}
+    slot_pool.end_tree(4321, True, "macos")
+    assert signals == [(4321, 19, True), (4321, 9, True)]
+    said = capsys.readouterr().err.splitlines()
+    assert len(said) == 2 and said[0] == said[1]
+    assert said[0] == (
+        "cannot list this machine's processes (ps: No such file or directory): a process "
+        "that left its group is not found, and may still run"
+    )
+
+
+def test_what_a_process_started_is_found_through_its_parents() -> None:
+    parents = {0: 0, 1: 0, 20: 1, 30: 20, 31: 20, 40: 31, 50: 1, 60: 50}
+    assert slot_pool.descendants(20, parents) == [30, 31, 40]
+    assert slot_pool.descendants(50, parents) == [60]
+    assert slot_pool.descendants(40, parents) == []
+    assert slot_pool.descendants(99, parents) == []
+    # Process 0 is its own parent on some systems: the search still ends.
+    assert slot_pool.descendants(0, parents) == [1, 20, 50, 30, 31, 60, 40]
+
+
+# A run that starts a group, says so, and waits for its input to end.
+RUNNER = (
+    "import subprocess, sys; sys.path.insert(0, sys.argv[1]); import slot_pool;"
+    "group = slot_pool.ProcessGroup.launch([sys.executable, '-c', sys.argv[3]],"
+    " stdin=subprocess.DEVNULL, stdout=open(sys.argv[2], 'wb'));"
+    "print(group.process.pid, flush=True); sys.stdin.read()"
+)
+
+
+def _runner(tmp_path: Path, program: str) -> tuple[subprocess.Popen[str], int, int]:
+    """Start RUNNER with `program` as its group; returns it with the ids of the program
+    and of what that started, both running."""
     log = tmp_path / "grandchild.txt"
-    # The real interpreter, not a virtual environment's launcher: the launcher has a job
-    # of its own that would do the killing and hide a regression here.
+    # The real interpreter, not a virtual environment's launcher: on Windows the launcher
+    # has a job of its own that would do the killing and hide a regression here.
     python = getattr(sys, "_base_executable", sys.executable)
     process = subprocess.Popen(
-        [python, "-c", runner, str(TOOLS / "ci"), str(log)],
+        [python, "-c", RUNNER, str(TOOLS / "ci"), str(log), program],
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         text=True,
     )
     try:
         assert process.stdout is not None
         child = int(process.stdout.readline())
-        deadline = time.monotonic() + 20
-        while not (log.is_file() and log.read_text().strip()) and time.monotonic() < deadline:
-            time.sleep(0.1)
-        grandchild = int(log.read_text().split()[0])
-        assert _alive(child) and _alive(grandchild)
+        process.stdout.close()
+        grandchild = _first_number(log)
+        assert alive(child) and alive(grandchild)
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    return process, child, grandchild
+
+
+@TREES
+def test_killing_the_runner_takes_its_godot_processes_with_it(tmp_path: Path, program: str) -> None:
+    """A run that is killed outright (an agent's timeout) runs no cleanup of its own."""
+    process, child, grandchild = _runner(tmp_path, program)
+    process.kill()
+    process.wait()
+    assert wait_gone(child) and wait_gone(grandchild)
+
+
+@TREES
+def test_a_run_that_ends_without_closing_its_groups_takes_them_along(
+    tmp_path: Path, program: str
+) -> None:
+    process, child, grandchild = _runner(tmp_path, program)
+    assert process.stdin is not None
+    process.stdin.close()
+    assert process.wait(timeout=30) == 0
+    assert wait_gone(child) and wait_gone(grandchild)
+
+
+def _watchdog_of(runner: int, program: int) -> int:
+    """The watchdog a run started: its one child that is not the group's program."""
+    parents = slot_pool.process_parents()
+    [watchdog] = [pid for pid, parent in parents.items() if parent == runner and pid != program]
+    return watchdog
+
+
+@posix_only("signals that end a process")
+def test_the_watchdog_outlives_the_signal_that_ends_its_run(tmp_path: Path) -> None:
+    """A timeout that signals a run and each of its children: the watchdog must still be
+    there when the run is gone, or nothing ends what the run started."""
+    process, child, grandchild = _runner(tmp_path, SPAWN_APART_AND_WAIT)
+    try:
+        watchdog = _watchdog_of(process.pid, child)
+        os.kill(watchdog, signal.SIGTERM)
+        assert not wait_gone(watchdog, seconds=1.0), "the watchdog died of SIGTERM"
+    finally:
+        process.send_signal(signal.SIGTERM)
+        process.wait(timeout=30)
+    assert wait_gone(child) and wait_gone(grandchild) and wait_gone(watchdog)
+
+
+# A run that starts a group, loses its watchdog to a kill, and starts a second group.
+RUNNER_LOSING_ITS_WATCHDOG = (
+    "import subprocess, sys; sys.path.insert(0, sys.argv[1]); import slot_pool;"
+    "idle = [sys.executable, '-c', 'import time; time.sleep(60)'];"
+    "first = slot_pool.ProcessGroup.launch(idle, stdin=subprocess.DEVNULL);"
+    "slot_pool._watchdog._process.kill(); slot_pool._watchdog._process.wait();"
+    "second = slot_pool.ProcessGroup.launch(idle, stdin=subprocess.DEVNULL);"
+    "print(first.process.pid, second.process.pid, flush=True); sys.stdin.read()"
+)
+
+
+@posix_only("the watchdog process, which a job object makes needless on Windows")
+def test_a_watchdog_that_was_killed_is_replaced_and_knows_every_group() -> None:
+    python = getattr(sys, "_base_executable", sys.executable)
+    process = subprocess.Popen(
+        [python, "-c", RUNNER_LOSING_ITS_WATCHDOG, str(TOOLS / "ci")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        first, second = (int(word) for word in process.stdout.readline().split())
+        process.stdout.close()
+        assert alive(first) and alive(second)
     finally:
         process.kill()
         process.wait()
-    assert _wait_gone(child) and _wait_gone(grandchild)
+    assert wait_gone(first), "the group started before the watchdog was killed is still there"
+    assert wait_gone(second)
+
+
+@posix_only("signals that end a process")
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP", "SIGINT"])
+def test_a_signal_that_ends_the_runner_ends_its_godot_processes(tmp_path: Path, name: str) -> None:
+    process, child, grandchild = _runner(tmp_path, SPAWN_APART_AND_WAIT)
+    process.send_signal(getattr(signal, name))
+    assert process.wait(timeout=30) != 0
+    assert wait_gone(child) and wait_gone(grandchild)
 
 
 def test_run_captured_returns_output_and_kills_on_timeout() -> None:
@@ -199,10 +717,10 @@ def test_run_captured_returns_output_and_kills_on_timeout() -> None:
     code, _ = slot_pool.run_captured([sys.executable, "-c", "raise SystemExit(7)"], 30)
     assert code == 7
     started = time.monotonic()
-    code, output = slot_pool.run_captured([sys.executable, "-u", "-c", SPAWN_AND_WAIT], 3)
-    assert code is None and time.monotonic() - started < 30
-    if os.name == "nt":
-        assert _wait_gone(int(output.split()[0]))
+    for program in (SPAWN_AND_WAIT, SPAWN_APART_AND_WAIT):
+        code, output = slot_pool.run_captured([sys.executable, "-u", "-c", program], 3)
+        assert code is None and time.monotonic() - started < 60
+        assert wait_gone(int(output.split()[0]))
     with pytest.raises(OSError):
         slot_pool.run_captured(["no-such-program-anywhere"], 5)
 

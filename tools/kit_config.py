@@ -14,7 +14,9 @@ same rules; change the three together (tools/tests/test_kit_config_parity.py com
 kit.json, every key optional:
 
     godot.version                   "4.7.2"   the pinned release
-    godot.windows_x86_64_sha512     ""        checksum of that release's archive
+    godot.<build>_sha512            ""        checksum of that release's archive, one per
+                                              build: windows_x86_64, linux_x86_64,
+                                              linux_arm64, macos_universal
     godot.search_roots              []        extra folders searched for Godot
     gdunit4.version                 ""        the pinned gdUnit4
     gdunit4.source_archive_sha256   ""        checksum of its source archive
@@ -30,19 +32,56 @@ type is an error, never a silent default.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator
+import platform as _platform
+import sys
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 
 REPO = Path(__file__).resolve().parents[1]
 CONFIG_NAME = "kit.json"
+# The official Godot downloads the kit knows: kit.json pins one checksum for each, as
+# godot.<build>_sha512.
+GODOT_BUILDS = ("windows_x86_64", "linux_x86_64", "linux_arm64", "macos_universal")
+# What platform.machine() calls the processors Godot is built for.
+ARCHITECTURES = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "arm64", "aarch64": "arm64"}
+NO_CHECKSUMS: Mapping[str, str] = MappingProxyType(dict.fromkeys(GODOT_BUILDS, ""))
+
+
+def host_platform() -> str:
+    """The system the tools run on: "windows", "macos" or "linux"."""
+    if sys.platform == "win32":
+        return "windows"
+    return "macos" if sys.platform == "darwin" else "linux"
+
+
+def host_architecture() -> str:
+    """This machine's processor: "x86_64", "arm64", or its own name for another."""
+    machine = _platform.machine().lower()
+    return ARCHITECTURES.get(machine, machine)
+
+
+def godot_build(platform: str | None = None, architecture: str | None = None) -> str:
+    """The official Godot download for a system (default: this one), as one of
+    GODOT_BUILDS; "" when Godot publishes none for it. tools/kit_config.ps1
+    Get-KitGodotBuild is the same rule."""
+    platform = platform or host_platform()
+    architecture = architecture or host_architecture()
+    if platform == "windows":
+        return "windows_x86_64"  # the 64-bit x86 build, also on Windows for ARM
+    if platform == "macos":
+        return "macos_universal"
+    build = f"{platform}_{architecture}"
+    return build if build in GODOT_BUILDS else ""
 
 
 @dataclass(frozen=True)
 class KitConfig:
     root: Path
     godot_version: str = "4.7.2"
-    godot_windows_sha512: str = ""
+    # build -> SHA-512 of its archive, for every one of GODOT_BUILDS; read-only.
+    godot_sha512: Mapping[str, str] = field(default=NO_CHECKSUMS, hash=False)
     godot_search_roots: tuple[str, ...] = ()
     gdunit4_version: str = ""
     gdunit4_sha256: str = ""
@@ -87,6 +126,16 @@ def project_folder(text: str) -> str:
         else:
             parts.append(part)
     return "/".join(parts)
+
+
+def project_path(path: str | Path, root: Path) -> Path:
+    """Where a path that is absolute or project-relative points; it need not exist. A
+    relative one starts at `root` and takes either slash on every system, as kit.json's
+    folders and tools/kit_config.ps1 do. An absolute one is read as this system writes it."""
+    target = Path(path)
+    if target.is_absolute():
+        return target
+    return root / str(path).replace("\\", "/")
 
 
 def _section(raw: dict, name: str) -> dict:
@@ -164,7 +213,7 @@ def load(root: Path | None = None) -> KitConfig:
     gdscript = _section(raw, "gdscript")
     defaults = KitConfig(root=base)
     godot_version = _text(godot, "godot", "version", defaults.godot_version)
-    godot_sha512 = _text(godot, "godot", "windows_x86_64_sha512")
+    godot_sha512 = {build: _text(godot, "godot", f"{build}_sha512") for build in GODOT_BUILDS}
     search_roots = _texts(godot, "godot", "search_roots")
     gdunit4_version = _text(gdunit4, "gdunit4", "version")
     gdunit4_sha256 = _text(gdunit4, "gdunit4", "source_archive_sha256")
@@ -188,7 +237,7 @@ def load(root: Path | None = None) -> KitConfig:
     return KitConfig(
         root=base,
         godot_version=godot_version,
-        godot_windows_sha512=godot_sha512,
+        godot_sha512=MappingProxyType(godot_sha512),
         godot_search_roots=search_roots,
         gdunit4_version=gdunit4_version,
         gdunit4_sha256=gdunit4_sha256,
@@ -243,12 +292,12 @@ def source_files(
 ) -> list[Path]:
     """The project's authored files with one of `suffixes`, sorted.
 
-    `path` (a file or folder, absolute or project-relative) narrows the search. A file
-    named this way is always returned. A folder gives its authored files: the
-    `source.exclude` folders inside it stay out and the `source.include` folders inside it
-    come back, unless the folder itself is at or under an excluded one: asking for an
-    excluded folder by name checks all of it. Raises ValueError when `path` does not exist
-    or lies outside the project.
+    `path` (a file or folder, absolute or project-relative: see `project_path`) narrows
+    the search. A file named this way is always returned. A folder gives its authored
+    files: the `source.exclude` folders inside it stay out and the `source.include`
+    folders inside it come back, unless the folder itself is at or under an excluded one:
+    asking for an excluded folder by name checks all of it. Raises ValueError when `path`
+    does not exist or lies outside the project.
     """
     cfg = config or load()
     wanted = frozenset(suffix.lower() for suffix in suffixes)
@@ -256,8 +305,7 @@ def source_files(
     if path is None:
         named = ""
     else:
-        target = Path(path)
-        full = (target if target.is_absolute() else cfg.root / target).resolve()
+        full = project_path(path, cfg.root).resolve()
         if not full.exists():
             raise ValueError(f"path does not exist: {full}")
         if full != cfg.root and cfg.root not in full.parents:

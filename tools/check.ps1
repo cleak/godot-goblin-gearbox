@@ -16,7 +16,8 @@
 #   validate-all   tools/validate_all.gd          every script, scene and resource loads
 #   scenes         godot --headless -- --devtools-validate   every scene instantiates: its
 #                  scripts compile and attach, its signal connections hold. Needs the
-#                  DevTools addon and its autoload; starts the project for a moment.
+#                  DevTools addon, its autoload and a main scene; starts the project
+#                  for a moment.
 #   test-lint      tools/lint_tests.ps1           gdUnit4 suites are well-formed
 #   ruff           uv run ruff check tools        in a project the kit was installed
 #                  into: only its own Python files under tools/, skipped with none
@@ -40,6 +41,13 @@
 # Outside a git repository pytest runs. Without -Changed every gate always runs.
 # On the base branch itself (a main with no remote copy) what is committed
 # cannot count as changed: the last lines of the run say so.
+#
+# No gate waits for ever: -GateTimeoutSeconds (900) is the longest one gate's
+# process may run, each Godot that tools/typecheck.ps1 starts included. Past it the
+# gate is killed with everything it started and its row says "timed out after
+# <n> s"; 0 means no limit. The tests keep their own timeout (tools/test.ps1: 300 s,
+# -TestTimeoutSeconds changes it). A project without a main scene skips "scenes":
+# Godot would say so in a dialog and wait for a click, with --headless too.
 #
 # A gate whose tool is not in the project is reported as "skipped" with the
 # reason. Only a failing gate's output is printed, each Godot error once and
@@ -224,11 +232,13 @@ function Invoke-Gate {
         # What a clean run prints when it had nothing to check: that run is
         # "skipped" with -NothingDetail, never "pass".
         [string]$NothingPattern = "",
-        [string]$NothingDetail = ""
+        [string]$NothingDetail = "",
+        # Variables the gate gets on top of this process's own.
+        [System.Collections.IDictionary]$Environment = @{}
     )
     try {
         $run = Invoke-KitProcess -FilePath $FilePath -Arguments $Arguments `
-            -WorkingDirectory $projectRoot -TimeoutSeconds $TimeoutSeconds
+            -WorkingDirectory $projectRoot -TimeoutSeconds $TimeoutSeconds -Environment $Environment
     } catch {
         Add-GateResult -Name $Name -Status "FAIL" -Detail "could not start" -Output $_.Exception.Message
         return
@@ -285,10 +295,12 @@ function Invoke-ScriptGate {
         Add-GateResult -Name $Name -Status "skipped" -Detail "tools/$Script not present"
         return
     }
+    # A gate's PowerShell leaves nothing in the temp folder when its timeout kills it,
+    # and never writes the user's PowerShell startup profile.
     Invoke-Gate -Name $Name -FilePath $pwsh `
         -Arguments (@("-NoProfile", "-NonInteractive", "-File", $file) + $Arguments) `
         -TimeoutSeconds $TimeoutSeconds -DetailPattern $DetailPattern -ExitDetails $ExitDetails `
-        -LastLineOnFail
+        -LastLineOnFail -Environment (Get-KitQuietPowerShellEnvironment)
 }
 
 function Invoke-GodotGate {
@@ -368,10 +380,13 @@ $kitFiles = @("kit.json", "pyproject.toml", "uv.lock")
 function Get-KitFileChanged {
     # The first changed path that belongs to the kit's tools, or "".
     param([string[]]$Files = @())
+    $comparison = Get-KitPathComparison
     foreach ($file in $Files) {
-        if ($kitFiles -contains $file) { return $file }
+        foreach ($name in $kitFiles) {
+            if ($file.Equals($name, $comparison)) { return $file }
+        }
         foreach ($folder in $kitFolders) {
-            if ($file.StartsWith($folder, [System.StringComparison]::OrdinalIgnoreCase)) { return $file }
+            if ($file.StartsWith($folder, $comparison)) { return $file }
         }
     }
     return ""
@@ -456,6 +471,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $projectRoot "addons/agent_devtools"
     Add-GateResult -Name "scenes" -Status "skipped" -Detail "addons/agent_devtools not present"
 } elseif (-not (Test-KitDevToolsAutoload)) {
     Add-GateResult -Name "scenes" -Status "skipped" -Detail "the DevTools autoload is not registered in project.godot"
+} elseif (-not (Get-KitMainScene -ProjectRoot $projectRoot)) {
+    # Nothing to start: Godot would say so in a dialog and wait for a click.
+    Add-GateResult -Name "scenes" -Status "skipped" `
+        -Detail "no main scene: project.godot sets no application/run/main_scene, so no game starts"
 } elseif (-not $godot) {
     Add-GateResult -Name "scenes" -Status "FAIL" -Detail "Godot not found"
 } else {
@@ -482,13 +501,13 @@ Invoke-ScriptGate -Name "test-lint" -Script "lint_tests.ps1"
 $pythonTools = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter "*.py" -File -Recurse |
         ForEach-Object { ConvertTo-KitRelativePath $_.FullName })
 $manifestProblem = ""
+$kitInstalled = [System.Collections.Generic.HashSet[string]]::new()
 try {
-    $kitInstalled = @(Get-KitInstalledFiles)
+    $kitInstalled = Get-KitInstalledFileSet
 } catch {
-    $kitInstalled = @()
     $manifestProblem = $_.Exception.Message
 }
-$ownPython = @($pythonTools | Where-Object { $kitInstalled -notcontains $_ })
+$ownPython = @($pythonTools | Where-Object { -not $kitInstalled.Contains($_) })
 if ($pythonTools.Count -eq 0) {
     Add-GateResult -Name "ruff" -Status "skipped" -Detail "no Python files under tools/"
 } elseif ($manifestProblem) {

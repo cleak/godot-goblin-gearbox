@@ -62,9 +62,11 @@ func _remove_mailbox(root: String) -> void:
 func test_active_only_in_debug_runs_that_are_not_headless_script_tools() -> void:
 	var script_run: PackedStringArray = ["--headless", "-s", "res://tools/lint_project.gd"]
 	var long_flag: PackedStringArray = ["--script", "res://tools/lint_project.gd"]
-	assert_bool(DevToolsScript.is_active_run(true, "Windows", [])).is_true()
+	# DisplayServer.get_name(): "Windows", "X11", "Wayland", "macOS", or "headless".
+	for display: String in ["Windows", "X11", "Wayland", "macOS"]:
+		assert_bool(DevToolsScript.is_active_run(true, display, [])).is_true()
+		assert_bool(DevToolsScript.is_active_run(true, display, script_run)).is_true()
 	assert_bool(DevToolsScript.is_active_run(true, "headless", [])).is_true()
-	assert_bool(DevToolsScript.is_active_run(true, "Windows", script_run)).is_true()
 	assert_bool(DevToolsScript.is_active_run(true, "headless", script_run)).is_false()
 	assert_bool(DevToolsScript.is_active_run(true, "headless", long_flag)).is_false()
 	assert_bool(DevToolsScript.is_active_run(false, "Windows", [])).is_false()

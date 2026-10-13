@@ -70,10 +70,13 @@ def allowed(relative_path: str, allowlist: dict[str, str]) -> bool:
 
 
 def entry_files(key: str, config: kit_config.KitConfig, suffix: str = ".gd") -> list[Path]:
-    """The existing files one allowlist entry covers."""
+    """The existing files one allowlist entry covers. `b.GD` is a script on every system,
+    as it is to the scan (tools/kit_config.py): the suffix is matched without letter case."""
     target = config.root / key
     if key.endswith("/"):
-        return sorted(target.rglob(f"*{suffix}")) if target.is_dir() else []
+        if not target.is_dir():
+            return []
+        return sorted(target.rglob(f"*{suffix}", case_sensitive=False))
     return [target] if target.is_file() else []
 
 

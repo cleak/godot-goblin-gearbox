@@ -8,14 +8,22 @@ and is the same in every project that uses the kit. Where they disagree, Project
 Building a game, not changing the kit? Start with this. It names the game and deletes the
 kit's own tests, which you do not need:
 
-```powershell
+```sh
 pwsh ./tools/new_game.ps1 -Title "My Game" -Blurb "One line about it." -RemoveKitTests
 ```
 
 ## 1. Find the marks
 
+In pwsh:
+
 ```powershell
 Select-String -Path AGENTS.md -Pattern '\((sample|default)\)'
+```
+
+In bash:
+
+```bash
+grep -nE '\((sample|default)\)' AGENTS.md
 ```
 
 | Mark | Sections | Do |
@@ -81,7 +89,7 @@ Finish with `pwsh ./tools/check.ps1`.
 
 Agents load this file on every turn of every session. Each line costs each time.
 
-```powershell
+```sh
 uv run python tools/check_agents_md.py
 ```
 
@@ -97,6 +105,8 @@ uv run python tools/check_agents_md.py
 
 - The Kit part takes 100 of the 200 lines, and a test of the kit keeps it there. The rest is
   yours: the title, the lines on top and Project. They ship at about 60.
+- The Kit part's runtime loop gives the launch line for Windows and for Linux and macOS.
+  Building on one system only? Say so in Fixed decisions; the Kit part stays as shipped.
 - Over the budget: move a rule to its folder or to `docs/` (below). An agent does not raise
   a limit.
 - A placeholder in angle brackets (`test_<name>.gd`) is not checked; the folders written out
@@ -132,9 +142,9 @@ agent then opens the page only when the task calls for it.
 
 Pull the kit, then run its installer on your project:
 
-```powershell
-pwsh ./install.ps1 -Target C:\path\to\game -DryRun
-pwsh ./install.ps1 -Target C:\path\to\game
+```sh
+pwsh ./install.ps1 -Target ../my-game -DryRun
+pwsh ./install.ps1 -Target ../my-game
 ```
 
 A game that began as the template has no `tools/kit_manifest.json`, the record that tells the

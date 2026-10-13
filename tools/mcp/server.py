@@ -23,7 +23,6 @@ import argparse
 import base64
 import json
 import sys
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -255,16 +254,15 @@ def failure(message: str) -> dict[str, Any]:
 
 def run_wait(project: Path, arguments: dict) -> dict[str, Any]:
     timeout = float(arguments.get("timeout", 60.0))
-    deadline = time.monotonic() + timeout
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return failure(f"The game did not answer within {timeout:g}s. Is it running?")
-        try:
-            attempt = min(devtools.WAIT_ATTEMPT_SECONDS, remaining)
-            return tool_result(devtools.send_command(project, "ping", timeout=attempt))
-        except devtools.NoResponseError:
-            continue
+    try:
+        return tool_result(devtools.wait_for_game(project, timeout))
+    except devtools.NoResponseError:
+        mailbox = devtools.get_mailbox_paths(devtools.get_user_data_path(project))["root"]
+        return failure(
+            f"The game did not answer within {timeout:g}s. Is it running, with this "
+            f"server's {devtools.SESSION_ENV}? Its mailbox would be {mailbox}. "
+            "If it was started, its output says why."
+        )
 
 
 def run_sequence(project: Path, arguments: dict) -> dict[str, Any]:

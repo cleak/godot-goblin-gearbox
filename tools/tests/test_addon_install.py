@@ -3,14 +3,17 @@ the swap with rollback, and the compare against upstream. No network: archives a
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import sys
 import zipfile
 from io import BytesIO
 from pathlib import Path
 
 import pytest
+from _gate_fixtures import is_folder_link, link_folder, unlink_folder
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
@@ -146,6 +149,57 @@ def test_an_empty_folder_is_installed_into_without_force(tmp_path: Path) -> None
     destination.mkdir(parents=True)
     _install(destination, _archive(), force=False)
     assert set(_tree(destination)) == set(FILES)
+
+
+@pytest.mark.parametrize("code", [errno.EXDEV, errno.EBUSY])
+def test_a_folder_that_cannot_be_renamed_is_left_as_it_was(
+    tmp_path: Path, monkeypatch, code: int
+) -> None:
+    """The addon folder as a mount point of its own (a container volume): a rename out of
+    it fails, with EXDEV or EBUSY by system. The system is passed in: no test mounts."""
+    destination = tmp_path / "addons" / "fixture"
+    _install(destination, _archive())
+    (destination / "plugin.gd").write_text("# edited locally", encoding="utf-8")
+    before = _tree(destination)
+    rename = Path.replace
+
+    def refuse(self: Path, target: Path) -> Path:
+        if self == destination:
+            raise OSError(code, os.strerror(code), str(self), None, str(target))
+        return rename(self, target)
+
+    monkeypatch.setattr(Path, "replace", refuse)
+    with pytest.raises(RuntimeError, match="cannot be replaced whole: it is a mount point") as said:
+        _install(destination, _archive())
+    assert str(destination) in str(said.value) and "\n" not in str(said.value)
+    assert _tree(destination) == before
+    assert [path.name for path in (tmp_path / "addons").iterdir()] == ["fixture"]
+    # Any other failure of the rename is the system's own error, unchanged.
+    code = errno.EACCES
+    with pytest.raises(PermissionError):
+        _install(destination, _archive())
+    assert _tree(destination) == before
+
+
+def test_a_link_is_never_installed_through(tmp_path: Path) -> None:
+    """A symbolic link, or a junction on Windows, where a symbolic link needs a privilege."""
+    elsewhere = tmp_path / "elsewhere"
+    link = tmp_path / "addons" / "fixture"
+    link.parent.mkdir()
+    for there in (True, False):  # a link to a folder, then a link that points nowhere
+        elsewhere.mkdir()
+        link_folder(link, elsewhere)
+        if not there:
+            elsewhere.rmdir()
+        for force in (True, False):
+            with pytest.raises(RuntimeError, match="may not be a link or junction"):
+                _install(link, _archive(), force=force)
+        assert is_folder_link(link) and elsewhere.exists() == there
+        assert not there or not any(elsewhere.iterdir())
+        assert [path.name for path in link.parent.iterdir()] == ["fixture"]
+        unlink_folder(link)
+        if there:
+            elsewhere.rmdir()
 
 
 def test_a_bad_hash_touches_nothing(existing: Path) -> None:
@@ -301,6 +355,60 @@ def test_the_command_installs_checks_and_compares_without_touching_the_project(
     assert run(["--destination", str(target.parent), "--sha256", digest, "--force"]) == 1
     assert "refusing to replace" in capsys.readouterr().err
     assert _tree(target.parent) == before and len(downloads) == downloaded
+
+
+def _folder_link(link: Path, to: Path) -> None:
+    """A link to a folder: a junction on Windows, where a symbolic link needs a privilege."""
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(to), str(link))
+    else:
+        link.symlink_to(to, target_is_directory=True)
+
+
+def test_the_command_follows_no_link_to_its_destination(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    payload = _archive()
+    digest = hashlib.sha256(payload).hexdigest()
+    monkeypatch.setattr(install_gdunit4, "SPEC", _spec(tmp_path / "unused"))
+    monkeypatch.setattr(install_gdunit4, "load_pin", lambda _spec: (VERSION, digest))
+    downloads: list[str] = []
+    monkeypatch.setattr(addon, "download", lambda _spec, version: downloads.append(version))
+    # Someone else's install of the addon, with an edit of theirs.
+    shared = tmp_path / "shared" / "fixture"
+    _install(shared, payload)
+    (shared / "plugin.gd").write_text("# edited by its owner", encoding="utf-8")
+    before = _tree(shared)
+    link = tmp_path / "game" / "addons" / "fixture"
+    link.parent.mkdir(parents=True)
+    _folder_link(link, shared)
+    monkeypatch.chdir(link.parent)
+    for written in (str(link), "fixture", os.path.join("..", "addons", "fixture")):
+        for switches in (["--force"], []):
+            assert install_gdunit4.main(["--destination", written, *switches]) == 1, written
+            said = capsys.readouterr().err
+            assert f"may not be a link or junction: {link}" in said, said
+    assert _tree(shared) == before and downloads == []
+    assert [path.name for path in tmp_path.iterdir()] == ["game", "shared"]
+
+
+def test_the_command_installs_nothing_where_a_link_points(tmp_path: Path, monkeypatch) -> None:
+    """A link that points nowhere: nothing is made there."""
+    monkeypatch.setattr(install_gdunit4, "SPEC", _spec(tmp_path / "unused"))
+    monkeypatch.setattr(install_gdunit4, "load_pin", lambda _spec: (VERSION, "f" * 64))
+    downloads: list[str] = []
+    monkeypatch.setattr(addon, "download", lambda _spec, version: downloads.append(version))
+    link = tmp_path / "fixture"
+    gone = tmp_path / "not there"
+    gone.mkdir()
+    link_folder(link, gone)
+    gone.rmdir()
+    for switches in (["--force"], []):
+        assert install_gdunit4.main(["--destination", str(link), *switches]) == 1
+    assert downloads == [] and [path.name for path in tmp_path.iterdir()] == ["fixture"]
+    assert is_folder_link(link)
 
 
 def test_another_version_needs_its_own_hash(monkeypatch, capsys) -> None:

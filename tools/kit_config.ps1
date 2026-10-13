@@ -14,12 +14,158 @@
 # (tools/tests/test_kit_config_parity.py compares them). The keys and their
 # defaults are listed at the top of tools/kit_config.py.
 #
+# Get-KitPlatform, Get-KitArchitecture and Get-KitGodotBuild name the machine;
+# a rule that differs by system takes the system as a parameter, so that every
+# branch can be tested on any machine.
+#
 # Get-KitConfig throws one line that names what is wrong in kit.json. A missing
 # file, a missing key, null and "" mean the default; a value of the wrong type
 # is an error, never a silent default.
 
 function Get-KitRoot {
     return [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+}
+
+function Get-KitPlatform {
+    # The system the tools run on: "windows", "macos" or "linux".
+    # PowerShell's own variables: every 7.x has them ([OperatingSystem]::IsWindows()
+    # needs 7.1). Windows PowerShell 5.1 has neither, and runs on Windows only.
+    if ($PSVersionTable.PSEdition -eq "Desktop" -or $IsWindows) { return "windows" }
+    if ($IsMacOS) { return "macos" }
+    return "linux"
+}
+
+function Get-KitArchitecture {
+    # This machine's processor: "x86_64", "arm64", or .NET's name for another.
+    $name = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    if ($name -eq "x64") { return "x86_64" }
+    return $name
+}
+
+function Get-KitGodotBuilds {
+    # The official Godot downloads the kit knows: kit.json pins one checksum for
+    # each, as godot.<build>_sha512.
+    return @("windows_x86_64", "linux_x86_64", "linux_arm64", "macos_universal")
+}
+
+function Get-KitGodotBuild {
+    # The official Godot download for a system (default: this one), as one of
+    # Get-KitGodotBuilds; "" when Godot publishes none for it.
+    # tools/kit_config.py godot_build() is the same rule.
+    param([string]$Platform = "", [string]$Architecture = "")
+    if (-not $Platform) { $Platform = Get-KitPlatform }
+    if (-not $Architecture) { $Architecture = Get-KitArchitecture }
+    # The 64-bit x86 build, also on Windows for ARM.
+    if ($Platform -ceq "windows") { return "windows_x86_64" }
+    if ($Platform -ceq "macos") { return "macos_universal" }
+    $build = "${Platform}_$Architecture"
+    if ((Get-KitGodotBuilds) -ccontains $build) { return $build }
+    return ""
+}
+
+function Get-KitInstallHint {
+    # How to get a program the kit needs (uv, git) on -Platform (default: this
+    # machine), as the text of a fix line.
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet("uv", "git")][string]$Tool,
+        [string]$Platform = ""
+    )
+    if (-not $Platform) { $Platform = Get-KitPlatform }
+    $hints = @{
+        windows = @{
+            uv  = "winget install astral-sh.uv   (or see https://docs.astral.sh/uv/)"
+            git = "winget install Git.Git"
+        }
+        macos   = @{
+            uv  = "brew install uv   (or see https://docs.astral.sh/uv/)"
+            git = "xcode-select --install   (or brew install git)"
+        }
+        linux   = @{
+            uv  = "install uv: https://docs.astral.sh/uv/getting-started/installation/"
+            git = "install git with your package manager (apt install git, dnf install git)"
+        }
+    }
+    return $hints[$Platform][$Tool]
+}
+
+function Get-KitPowerShellProblem {
+    <#
+    Why PowerShell -Version cannot run the kit's scripts on -Platform (default:
+    this machine), as one line; "" when it can. The scripts are written for 7.0.
+    Linux and macOS need 7.2:
+    - Linux: 7.0 and 7.1 load OpenSSL 1.x to compute a checksum and abort ("No
+      usable version of libssl was found") where only OpenSSL 3 is installed;
+      Ubuntu 24.04 is one such system.
+    - macOS: the scripts were never run there on 7.0 or 7.1, on any Mac, and
+      neither has a build for Apple silicon (7.2 is the first).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][version]$Version,
+        [string]$Platform = ""
+    )
+    if (-not $Platform) { $Platform = Get-KitPlatform }
+    if ($Version.Major -lt 7) { return "the kit's scripts need 7 or newer" }
+    if ($Platform -ceq "windows" -or $Version -ge [version]"7.2") { return "" }
+    if ($Platform -ceq "macos") {
+        return "on macOS the kit's scripts need 7.2 or newer: 7.0 and 7.1 are not tested there " +
+            "and have no Apple silicon build"
+    }
+    return "on Linux the kit's scripts need 7.2 or newer: 7.0 and 7.1 cannot compute a checksum " +
+        "where only OpenSSL 3 is installed"
+}
+
+function Get-KitPowerShellRefusal {
+    <#
+    One line for a script that must not start on a PowerShell that cannot run it:
+    the version, what is wrong (Get-KitPowerShellProblem) and the fix; "" when it
+    can run. tools/setup.ps1 and tools/install_godot.ps1 ask before they download
+    anything: the checksum that follows would abort the process.
+    -Version: a PowerShell version (default: the running one). -Platform: the
+    system (default: this machine).
+    #>
+    param($Version = $PSVersionTable.PSVersion, [string]$Platform = "")
+    if (-not $Platform) { $Platform = Get-KitPlatform }
+    if ($Version -is [string]) { $Version = [version]$Version }
+    # Major.minor is all the rule reads, and all that Windows PowerShell 5.1 and
+    # PowerShell 7 name alike.
+    $problem = Get-KitPowerShellProblem -Version ([version]"$($Version.Major).$($Version.Minor)") -Platform $Platform
+    if (-not $problem) { return "" }
+    return "PowerShell ${Version}: $problem. Fix: $(Get-KitPowerShellFix -Platform $Platform)"
+}
+
+function Get-KitPowerShellFix {
+    # How to get a PowerShell the kit's scripts run on, for -Platform (default:
+    # this machine), as the text of a fix line.
+    param([string]$Platform = "")
+    if (-not $Platform) { $Platform = Get-KitPlatform }
+    $pages = "https://learn.microsoft.com/powershell/scripting/install"
+    switch -CaseSensitive ($Platform) {
+        "windows" {
+            return "winget install Microsoft.PowerShell   (then run the tools with pwsh, not powershell)"
+        }
+        "macos" { return "install the current PowerShell: $pages/installing-powershell-on-macos" }
+        default { return "install the current PowerShell: $pages/installing-powershell-on-linux" }
+    }
+}
+
+function Get-KitVenvTool {
+    # Where `uv sync` puts a command of the project's virtual environment, as a
+    # project-relative path, on -Platform (default: this machine).
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string]$Platform = ""
+    )
+    if (-not $Platform) { $Platform = Get-KitPlatform }
+    if ($Platform -ceq "windows") { return ".venv/Scripts/$Name.exe" }
+    return ".venv/bin/$Name"
+}
+
+function Get-KitPathComparison {
+    # How two paths of this machine compare: Windows ignores letter case. macOS
+    # compares as Linux does, as tools/kit_config.py does there: a path spelled
+    # in another letter case is "outside the project", never the wrong folder.
+    if ((Get-KitPlatform) -eq "windows") { return [System.StringComparison]::OrdinalIgnoreCase }
+    return [System.StringComparison]::Ordinal
 }
 
 function ConvertTo-KitProjectFolder {
@@ -157,7 +303,8 @@ function Get-KitConfig {
     $config = [ordered]@{
         Root             = $root
         GodotVersion     = "4.7.2"
-        GodotSha512      = ""
+        # build -> SHA-512 of its archive ("" when kit.json pins none).
+        GodotSha512      = [ordered]@{}
         GodotSearchRoots = @()
         Gdunit4Version   = ""
         Gdunit4Sha256    = ""
@@ -166,6 +313,7 @@ function Get-KitConfig {
         TestRoot         = "test"
         GdscriptStrict   = $true
     }
+    foreach ($build in (Get-KitGodotBuilds)) { $config.GodotSha512[$build] = "" }
     $file = Join-Path $root "kit.json"
     if (Test-Path -LiteralPath $file -PathType Leaf) {
         $json = Read-KitJson -File $file
@@ -175,7 +323,9 @@ function Get-KitConfig {
         $tests = Get-KitJsonSection $json "tests"
         $gdscript = Get-KitJsonSection $json "gdscript"
         $config.GodotVersion = Get-KitJsonText $godot "godot" "version" $config.GodotVersion
-        $config.GodotSha512 = Get-KitJsonText $godot "godot" "windows_x86_64_sha512"
+        foreach ($build in (Get-KitGodotBuilds)) {
+            $config.GodotSha512[$build] = Get-KitJsonText $godot "godot" "${build}_sha512"
+        }
         # No @( ) around these calls: each returns its list as one object.
         $config.GodotSearchRoots = Get-KitJsonTexts $godot "godot" "search_roots"
         $config.Gdunit4Version = Get-KitJsonText $gdunit4 "gdunit4" "version"
@@ -203,15 +353,44 @@ function Get-KitConfig {
     return [PSCustomObject]$config
 }
 
+function Test-GodotConfigStringOpen {
+    # True when a "string" is still open at the end of -Line, given whether one
+    # was open at its start (-Open). A backslash inside a string takes the next
+    # character with it; a ; outside one starts a comment.
+    param([string]$Line, [bool]$Open = $false)
+    if (-not $Open -and -not $Line.Contains('"')) { return $false }
+    foreach ($mark in [regex]::Matches($Line, '\\.|"|;')) {
+        $text = $mark.Value
+        if ($text -eq '"') {
+            $Open = -not $Open
+        } elseif ($text -eq ';') {
+            if (-not $Open) { break }
+        } elseif (-not $Open -and $text[1] -eq '"') {
+            # Outside a string a backslash escapes nothing.
+            $Open = $true
+        }
+    }
+    return $Open
+}
+
 function Get-GodotConfigSection {
     # key -> raw value for one [section] of a Godot config file (project.godot,
     # plugin.cfg). Godot writes a dictionary or array value over several lines;
-    # they are joined.
+    # they are joined. A string may run over several lines too (a description):
+    # what is inside it is no header and no entry, whatever it looks like.
+    # tools/devtools.py read_application_settings reads the same way.
     param([string[]]$Lines, [string]$Section)
     $values = @{}
     $inside = $false
     $key = ""
+    $open = $false
     foreach ($line in $Lines) {
+        $continued = $open
+        $open = Test-GodotConfigStringOpen -Line $line -Open $open
+        if ($continued) {
+            if ($inside -and $key -and $line.Trim()) { $values[$key] += " " + $line.Trim() }
+            continue
+        }
         if ($line -match '^\[([A-Za-z_][\w./-]*)\]\s*$') {
             $inside = $Matches[1] -eq $Section
             $key = ""
@@ -301,6 +480,17 @@ function Get-KitInstalledFiles {
     }
 }
 
+function Get-KitInstalledFileSet {
+    # Get-KitInstalledFiles as a set that compares paths as this machine does:
+    # on Linux and macOS tools/Lint.gd is not the kit's tools/lint.gd. Assign
+    # it, do not wrap the call in @( ). Throws as Get-KitInstalledFiles does.
+    $files = [string[]]@(Get-KitInstalledFiles)
+    $set = [System.Collections.Generic.HashSet[string]]::new(
+        $files, [System.StringComparer]::FromComparison((Get-KitPathComparison))
+    )
+    return , $set
+}
+
 function Test-KitDevToolsAutoload {
     # True when project.godot registers addons/agent_devtools/dev_tools.gd as the
     # autoload "DevTools". Written by hand the entry is the res:// path; the
@@ -321,6 +511,29 @@ function Test-KitDevToolsAutoload {
     return [bool]($uid -and $entry -ceq $uid)
 }
 
+function Get-KitMainScene {
+    # The scene the project starts with: application/run/main_scene, as
+    # project.godot or an override.cfg beside it sets it, for every system or
+    # for one feature (run/main_scene.<feature>). "" when neither names one:
+    # such a project starts no game. Godot says so in a dialog and waits for a
+    # click, with --headless too.
+    param([string]$ProjectRoot = (Get-KitRoot))
+    foreach ($name in @("override.cfg", "project.godot")) {
+        $file = Join-Path $ProjectRoot $name
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+        $application = Get-GodotConfigSection -Lines @(Get-Content -LiteralPath $file) -Section "application"
+        foreach ($key in @($application.Keys | Sort-Object)) {
+            if ($key -cne "run/main_scene" -and
+                -not $key.StartsWith("run/main_scene.", [System.StringComparison]::Ordinal)) {
+                continue
+            }
+            $scene = ([string]$application[$key]).Trim().Trim('"')
+            if ($scene) { return $scene }
+        }
+    }
+    return ""
+}
+
 function ConvertTo-KitRelativePath {
     # Project-relative path with forward slashes ("" for the root itself).
     param([Parameter(Mandatory = $true)][string]$FullPath)
@@ -334,33 +547,66 @@ function Test-KitPathInProject {
     param([Parameter(Mandatory = $true)][string]$FullPath)
     $root = (Get-KitRoot).TrimEnd('\', '/')
     $full = [System.IO.Path]::GetFullPath($FullPath)
-    return $full -eq $root -or $full.StartsWith(
-        $root + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase
-    )
+    $comparison = Get-KitPathComparison
+    return $full.Equals($root, $comparison) -or
+        $full.StartsWith($root + [System.IO.Path]::DirectorySeparatorChar, $comparison)
 }
 
 function Resolve-KitLinkedPath {
-    # -FullPath (existing) with every directory link on the way, junction or
-    # symbolic link, replaced by its target: Python's Path.resolve().
+    # -FullPath with every directory link on the way, junction or symbolic
+    # link, replaced by its target: Python's Path.resolve(). From the first part
+    # that does not exist on, the path is kept as written.
     param([Parameter(Mandatory = $true)][string]$FullPath)
     $full = [System.IO.Path]::GetFullPath($FullPath)
     $current = [System.IO.Path]::GetPathRoot($full)
-    $parts = $full.Substring($current.Length).Split(
-        [char[]]@('\', '/'), [System.StringSplitOptions]::RemoveEmptyEntries
-    )
+    # On Linux and macOS a backslash is a letter of a name, not a separator.
+    $separators = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $parts = $full.Substring($current.Length).Split($separators, [System.StringSplitOptions]::RemoveEmptyEntries)
+    $missing = $false
     foreach ($part in $parts) {
         $current = [System.IO.Path]::Combine($current, $part)
-        $attributes = [System.IO.File]::GetAttributes($current)
-        if (-not ($attributes -band [System.IO.FileAttributes]::ReparsePoint)) { continue }
-        # $null for a reparse point that is no link (a cloud placeholder).
-        $target = if ($attributes -band [System.IO.FileAttributes]::Directory) {
-            [System.IO.Directory]::ResolveLinkTarget($current, $true)
-        } else {
-            [System.IO.File]::ResolveLinkTarget($current, $true)
+        if ($missing) { continue }
+        # A target may be a link again: 40 in a row is what the systems follow.
+        for ($hop = 0; $hop -lt 40; $hop++) {
+            try {
+                $attributes = [System.IO.File]::GetAttributes($current)
+            } catch [System.IO.IOException] {
+                # Nothing is there: no link is left to follow.
+                $missing = $true
+                break
+            }
+            if (-not ($attributes -band [System.IO.FileAttributes]::ReparsePoint)) { break }
+            # Asked of PowerShell: .NET's ResolveLinkTarget needs PowerShell 7.2.
+            $link = Get-Item -LiteralPath $current -Force
+            # A reparse point that is no link (a cloud placeholder) stays.
+            if ($link.LinkType -notin @("SymbolicLink", "Junction")) { break }
+            $target = "$(@($link.Target)[0])"
+            if (-not $target) { break }
+            if (-not [System.IO.Path]::IsPathRooted($target)) {
+                $target = Join-Path ([System.IO.Path]::GetDirectoryName($current)) $target
+            }
+            $current = [System.IO.Path]::GetFullPath($target)
         }
-        if ($null -ne $target) { $current = $target.FullName }
     }
     return $current
+}
+
+function ConvertTo-KitProjectPath {
+    <#
+    -FullPath as a path below Get-KitRoot, or "" when it lies outside the
+    project. Links on the way are followed first (Resolve-KitLinkedPath), in
+    the path and in the root: the project reached through a link is the
+    project, and a link that leaves it names a path outside it.
+    #>
+    param([Parameter(Mandatory = $true)][string]$FullPath)
+    $root = Get-KitRoot
+    $target = Resolve-KitLinkedPath $FullPath
+    $realRoot = (Resolve-KitLinkedPath $root).TrimEnd('\', '/')
+    $inside = $realRoot + [System.IO.Path]::DirectorySeparatorChar
+    $comparison = Get-KitPathComparison
+    if ($target.TrimEnd('\', '/').Equals($realRoot, $comparison)) { return $root }
+    if ($target.StartsWith($inside, $comparison)) { return (Join-Path $root $target.Substring($inside.Length)) }
+    return ""
 }
 
 function Get-KitActualPath {
@@ -453,17 +699,9 @@ function Get-KitSourceFiles {
         # Links on the way are followed first, as tools/kit_config.py does: the
         # files are listed where they really are, and a link that leaves the
         # project names a path outside it. (The walk below follows no link.)
-        $target = Resolve-KitLinkedPath $full
-        $realRoot = (Resolve-KitLinkedPath $root).TrimEnd('\', '/')
-        $inside = $realRoot + [System.IO.Path]::DirectorySeparatorChar
-        if ($target.TrimEnd('\', '/') -ieq $realRoot) {
-            $full = $root
-        } elseif ($target.StartsWith($inside, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $full = Join-Path $root $target.Substring($inside.Length)
-        } else {
-            throw "Path is outside the project: $target"
-        }
-        $full = Get-KitActualPath $full
+        $inProject = ConvertTo-KitProjectPath $full
+        if (-not $inProject) { throw "Path is outside the project: $(Resolve-KitLinkedPath $full)" }
+        $full = Get-KitActualPath $inProject
         if (Test-Path -LiteralPath $full -PathType Leaf) {
             $item = Get-Item -LiteralPath $full
             if ($Extensions -contains $item.Extension.ToLowerInvariant()) { return @($item) }
@@ -491,5 +729,9 @@ function Get-KitSourceFiles {
             }
         }
     }
-    return @($files | Sort-Object FullName -Unique)
+    # Sort-Object -Unique ignores letter case: on Linux a.gd and A.gd are two files.
+    $seen = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::FromComparison((Get-KitPathComparison))
+    )
+    return @($files | Where-Object { $seen.Add($_.FullName) } | Sort-Object FullName)
 }

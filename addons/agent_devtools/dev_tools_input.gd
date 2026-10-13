@@ -424,6 +424,7 @@ func _run_sequence(sequence_id: String, steps: Array[Dictionary], timeout: float
 			break
 
 	var shot_error: String = await _screenshots.wait_for_writes()
+	mark_unwritten(results, _screenshots.unwritten)
 	if not shot_error.is_empty() and status == STATUS_PASSED:
 		status = STATUS_FAILED
 		message = "Sequence %s failed: %s" % [sequence_id, shot_error]
@@ -432,6 +433,18 @@ func _run_sequence(sequence_id: String, steps: Array[Dictionary], timeout: float
 		released = release_all()
 	_set_status(sequence_id, status, message, steps, results, released)
 	_log.call("input", message, {"status": status, "cleared_actions": released})
+
+
+## Marks the screenshot rows of `results` whose file is in `unwritten` (path -> why) as
+## failed. A capture is written after its step, so its row said "ok" before the write failed.
+static func mark_unwritten(
+	results: Array[Dictionary], unwritten: Dictionary[String, String]
+) -> void:
+	for row: Dictionary in results:
+		var result: Dictionary = row.get("result", {})
+		var path: String = str(result.get("path", ""))
+		if row.get("type") == STEP_SCREENSHOT and not path.is_empty() and unwritten.has(path):
+			row.merge({"status": "error", "error": unwritten[path]}, true)
 
 
 func _run_step(step: Dictionary, deadline_msec: int) -> Outcome:

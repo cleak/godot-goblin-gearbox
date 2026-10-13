@@ -21,6 +21,7 @@
     },
     {"type": "assert", "node": "Hud/Status", "property": "text", "equals": "Lamps 1/3   Moves 3"},
     {"type": "assert", "node": "Player", "property": "position:x", "ge": 351.5},
+    {"type": "wait", "seconds": 2.0, "until": {"node": ".", "property": "pulse", "equals": 0}},
     {"type": "screenshot", "filename": "smoke.png"}
   ]
 }

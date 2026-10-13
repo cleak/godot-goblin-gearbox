@@ -41,12 +41,13 @@ test or a check.
 
 ## The check
 
-```powershell
+```sh
 uv run python tools/check_architecture.py
 ```
 
 It reads `tools/ci/architecture_modules.json` and every authored `.gd` file, the test folder
-included. `pwsh ./tools/check.ps1` runs it as the `architecture` gate.
+included. `pwsh ./tools/check.ps1` runs it as the `architecture` gate. Its lines and exit
+codes are the same on Windows and Linux.
 
 No manifest, no check: the script prints `architecture: not configured` and `check.ps1`
 lists the gate as `skipped`. That is where a project starts after `install.ps1`, which does

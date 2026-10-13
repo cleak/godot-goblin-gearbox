@@ -7,11 +7,12 @@
 | [gdUnit4](https://github.com/MikeSchulze/gdUnit4) | `addons/gdUnit4/` | 6.2.2 | MIT, `addons/gdUnit4/LICENSE` |
 
 Copied unmodified from the release archive that `kit.json` pins (`gdunit4.version`,
-`gdunit4.source_archive_sha256`), so a clone runs tests with no install step.
+`gdunit4.source_archive_sha256`), so a clone runs tests with no install step. `--verify`
+compares every file with upstream; `--force` re-creates the folder from the archive.
 
-```powershell
-uv run python tools/install_gdunit4.py --verify   # compare every file with upstream
-uv run python tools/install_gdunit4.py --force    # re-create the folder from the archive
+```sh
+uv run python tools/install_gdunit4.py --verify
+uv run python tools/install_gdunit4.py --force
 ```
 
 `install.ps1` copies it into a project that has no `addons/gdUnit4`.

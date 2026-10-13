@@ -95,7 +95,7 @@ function Write-UncheckedReport {
             foreach ($path in $inAddons) {
                 if ($path -match '^res://addons/([^/]+)/') { $Matches[1] }
             }
-        ) | Sort-Object -Unique
+        ) | Sort-Object -Unique -CaseSensitive
         if (-not $addonFolders) { $addonFolders = @("<folder>") }
         $entries = @($addonFolders | ForEach-Object { "`"res://addons/$_`": 1" }) -join ", "
         Write-Host "Godot applies no warnings under res://addons unless project.godot includes the folder." `

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import os
 import sys
 from pathlib import Path
 from urllib.error import URLError
@@ -94,7 +95,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--sha256 must be 64 hexadecimal characters")
     spec = SPEC
     if args.destination:
-        spec = dataclasses.replace(SPEC, destination=args.destination.resolve())
+        # Made absolute as written: a destination that is a link is refused, not followed.
+        spec = dataclasses.replace(SPEC, destination=Path(os.path.abspath(args.destination)))
     try:
         if args.verify:
             return verify(spec, version=version, expected_hash=expected_hash)

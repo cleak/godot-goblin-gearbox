@@ -172,8 +172,6 @@ def test_an_import_outside_code_fails_and_inside_code_passes(project: Path) -> N
             "Addon: `addons/agent_devtools/`.",
             "`addons/agent_devtools/` does not exist in the project",
         ),
-        ("Wrong case: `tools/Check.ps1`.", "`tools/Check.ps1` does not exist in the project"),
-        ("Wrong case: `Tools/check.ps1`.", "`Tools/check.ps1` does not exist in the project"),
         ("Windows: `tools\\gone.ps1`.", "`tools/gone.ps1` does not exist in the project"),
         ('`preload("res://tools/gone.gd")`', "`tools/gone.gd` does not exist in the project"),
     ],
@@ -181,6 +179,31 @@ def test_an_import_outside_code_fails_and_inside_code_passes(project: Path) -> N
 def test_a_project_path_that_does_not_exist_fails(project: Path, line: str, problem: str) -> None:
     text = CLEAN + line + "\n"
     assert findings(project, text) == [f"AGENTS.md:{len(text.splitlines())}: {problem}"]
+
+
+def test_a_path_that_is_there_in_other_letters_is_named_as_the_project_spells_it(
+    project: Path,
+) -> None:
+    """Windows and macOS open `Docs/tools.md` for `docs/tools.md`; Linux and git do not.
+    After install.ps1 put the kit into a project's own `Docs/`, "does not exist" sent the
+    reader looking for a file that was there."""
+    lines = (
+        "Wrong case: `tools/Check.ps1`, `Tools/check.ps1`, `./DOCS/`.\n"
+        "Ship `Scripts/core/<rule>.gd`. Read [the tools](Docs/tools.md).\n"
+    )
+    where = len(CLEAN.splitlines()) + 1
+    rename = "in the project: make the two spellings match (upper and lower case count)"
+    assert findings(project, CLEAN + lines) == [
+        f"AGENTS.md:{where}: `tools/Check.ps1` is spelled `tools/check.ps1` {rename}",
+        f"AGENTS.md:{where}: `Tools/check.ps1` is spelled `tools/check.ps1` {rename}",
+        f"AGENTS.md:{where}: `DOCS/` is spelled `docs/` {rename}",
+        f"AGENTS.md:{where + 1}: `Scripts/core/` (in front of a placeholder) is spelled "
+        f"`scripts/core/` {rename}",
+        f"AGENTS.md:{where + 1}: link to `Docs/tools.md`, which is spelled `docs/tools.md` on "
+        "disk (upper and lower case count)",
+    ]
+    assert chk.other_spelling(project, "tools/check.ps1") == ""
+    assert chk.other_spelling(project, "tools/gone.ps1") == ""
 
 
 @pytest.mark.parametrize(
@@ -423,6 +446,16 @@ DOC_ALLOW = [
     ".gemini/settings.json",  # another agent's own settings
     ".aider.conf.yml",
     "report.json",  # written by tools/visual_diff/compare.py into its --output-dir
+    "Godot_v*",  # a Godot release's folder under .tools/godot/
+    # The pages' examples of a name that differs from the kit's in letter case only.
+    "Tools/*",
+    "Docs/*",
+    "Test/*",
+    "Tests/*",
+    "agents.md",
+    "[aA].gd",
+    "*.kit-new",  # install.ps1's temporary name for a file it is writing
+    "override.cfg",  # Godot's own file beside project.godot: it too may name a main scene
 ]
 DOC_PAGES = [
     "README.md",
@@ -439,6 +472,7 @@ DOC_PAGES = [
     "docs/devtools.md",
     "docs/feel.md",
     "docs/gotchas.md",
+    "docs/platforms.md",
     "docs/provenance.md",
     "docs/tools.md",
     "addons/agent_devtools/README.md",
@@ -589,6 +623,32 @@ def test_a_page_of_the_kit_names_real_paths_and_links(name: str) -> None:
     project = chk.Project(REPO, DOC_ALLOW)
     found, _left_out = chk.findings_of(text.encode("utf-8"), REPO / name, project, 0, 0, 0)
     assert found == [], "\n".join(f"{name}:{number}: {problem}" for number, problem in found)
+
+
+SHELL_BLOCK = re.compile(r"^```(sh|bash|zsh|shell)\n(.*?)^```$", re.MULTILINE | re.DOTALL)
+SHELL_COMMENT = re.compile(r"(^|\s)#(\s|$)")
+
+
+@pytest.mark.parametrize("name", DOC_PAGES)
+def test_no_command_a_page_gives_to_paste_carries_a_comment(name: str) -> None:
+    """A zsh somebody types into (the Mac's own shell) does not take `# ...` for a comment:
+    after a command the words arrive as arguments, and `pwsh ./tools/setup.ps1 # ...` fails
+    on `#`. bash and pwsh do. The words go in the sentence beside the block. A `powershell`
+    block is typed into pwsh, where `#` is a comment. AGENTS.md is read by agents, whose
+    shells nobody types into: it keeps its comments."""
+    text = shipped(name).replace("\r\n", "\n")
+    found = [
+        f"{name}: {line}"
+        for _shell, block in SHELL_BLOCK.findall(text)
+        for line in block.splitlines()
+        if SHELL_COMMENT.search(line)
+    ]
+    assert found == [], "\n".join(found)
+    # The rule sees what it is for.
+    seeded = (
+        "```sh\npwsh ./tools/check.ps1  # every gate\n```\n```powershell\n$x = 1  # fine\n```\n"
+    )
+    assert len([1 for _s, b in SHELL_BLOCK.findall(seeded) if SHELL_COMMENT.search(b)]) == 1
 
 
 def test_every_command_claude_code_pre_approves_names_a_real_file() -> None:

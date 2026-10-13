@@ -15,16 +15,38 @@ concurrency:
 
 defaults:
   run:
-    shell: pwsh
+    shell: bash
 
-# CI runs the two commands you run locally: tools/setup.ps1, then tools/check.ps1.
+# CI runs the two commands you run locally: tools/setup.ps1, then tools/check.ps1, in
+# PowerShell 7 on every system.
+# Each is started from bash and passes on its own last line (setup: ready, check: PASSED),
+# not on exit 0 alone: a PowerShell that aborts as it starts runs nothing and exits 0
+# (docs/gotchas.md, "Linux"). On Windows that bash is the one Git for Windows brings.
 # Actions are pinned by commit: a tag can be moved, a commit cannot. The comment names
 # the release; to update, take the commit of the new tag (git ls-remote <repository>).
+#
+# Systems: a game built for one system needs one entry in matrix.os. fail-fast is off, so
+# a red check on one system does not cancel the other.
+# The check needs nothing installed for a display: every Godot it starts is headless and
+# loads no X11, Wayland, Vulkan or OpenGL library (measured on Ubuntu 24.04). Xvfb is
+# for seeing the game, which the check does not do.
+# macOS: add macos-latest to matrix.os. The kit has never been run on macOS, here or
+# anywhere: docs/platforms.md.
 jobs:
   check:
-    name: check.ps1 (lint, types, project, tests)
-    runs-on: windows-latest
-    timeout-minutes: 45
+    name: check.ps1 on ${{ matrix.os }} (lint, types, project, tests)
+    runs-on: ${{ matrix.os }}
+    # Room for the check and for one gate that hangs to its limit (1800 s): the check then
+    # ends by itself and names the gate.
+    timeout-minutes: 75
+    env:
+      # No PowerShell of the job rewrites the startup profile: two that end together can
+      # leave it mixed. It also keeps a mixed one as it is: delete the file on the runner.
+      DOTNET_MultiCoreJitNoProfileGather: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,21 +63,38 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .tools/godot
-          key: godot-${{ runner.os }}-${{ hashFiles('kit.json') }}
+          key: godot-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kit.json') }}
 
+      # A script that exits non-zero ends its step there (set -eo pipefail); the lines after
+      # it ask for the script's last line.
       - name: Set up (Python tools, Godot, first import, doctor)
-        run: ./tools/setup.ps1 -InstallGodot
+        run: |
+          set -eo pipefail
+          pwsh ./tools/setup.ps1 -InstallGodot | tee "$RUNNER_TEMP/setup.out"
+          last="$(tail -n 1 "$RUNNER_TEMP/setup.out")"
+          case "$last" in
+            "setup: ready"*) ;;
+            *) echo "::error::setup.ps1 did not end with 'setup: ready': it did not run to its end"; exit 1 ;;
+          esac
 
       # A hosted runner has a few slow cores: one gate may take longer than the 900 s
       # that is the limit on a developer's machine.
       - name: Check (every gate)
-        run: ./tools/check.ps1 -GateTimeoutSeconds 1800
+        run: |
+          set -eo pipefail
+          pwsh ./tools/check.ps1 -GateTimeoutSeconds 1800 | tee "$RUNNER_TEMP/check.out"
+          last="$(tail -n 1 "$RUNNER_TEMP/check.out")"
+          case "$last" in
+            "check: PASSED"*) ;;
+            *) echo "::error::check.ps1 did not end with 'check: PASSED': it did not run to its end"; exit 1 ;;
+          esac
 
+      # Also for a job that ran out of time: a cancelled job is no failure().
       - name: Upload gate logs and test reports
-        if: failure()
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: check-artifacts
+          name: check-artifacts-${{ matrix.os }}
           path: artifacts/
           if-no-files-found: ignore
           retention-days: 14

@@ -5,10 +5,11 @@ from pathlib import Path
 import pytest
 from _gate_fixtures import (
     EMPTY_CLASS_CACHE,
-    PWSH,
-    WINDOWS,
+    NEEDS_PWSH,
     clean_env,
     copy_tools,
+    project_godot,
+    python_program,
     run_tool,
     write,
     write_kit_json,
@@ -18,30 +19,33 @@ PRESET = "Windows Desktop"
 PRESET_PATH = "build/windows/game.exe"
 
 # An engine that passes only when the folder is already there.
-ENGINE = (
-    "@echo off\r\n"
-    'if "%~1"=="--version" (echo 4.7.2.stable.fake& exit /b 0)\r\n'
-    'if exist "%KIT_EXPORT_PARENT%\\" (exit /b 0) else (exit /b 41)\r\n'
-)
+ENGINE = """import os
+import sys
+
+if sys.argv[1:2] == ["--version"]:
+    print("4.7.2.stable.fake")
+    sys.exit(0)
+sys.exit(0 if os.path.isdir(os.environ["KIT_EXPORT_PARENT"]) else 41)
+"""
 
 
-@pytest.mark.skipif(not WINDOWS or PWSH is None, reason="Windows PowerShell 7 tools")
+@NEEDS_PWSH
 @pytest.mark.parametrize("output", ["preset", "relative", "absolute"])
 def test_export_creates_parent_before_engine(tmp_path: Path, output: str) -> None:
     """The preset's own export_path and an explicit path, run from outside the project."""
     root = tmp_path / "checkout"
     copy_tools(root, "godot.ps1", "export_paths.ps1")
     write_kit_json(root)
-    write(root / "project.godot", "config_version=5\n")
+    write(root / "project.godot", project_godot(main_scene="res://main.tscn"))
     write(root / ".godot" / "global_script_class_cache.cfg", EMPTY_CLASS_CACHE)
     write(
         root / "export_presets.cfg",
         f'[preset.0]\nname="Other"\nexport_path="wrong/place/game.exe"\n\n'
-        f'[preset.1]\nname="{PRESET}"\nexport_path="{PRESET_PATH}"\n',
+        # Godot tells presets apart by the letter case of their names too.
+        f'[preset.1]\nname="{PRESET.lower()}"\nexport_path="wrong/case/game.exe"\n\n'
+        f'[preset.2]\nname="{PRESET}"\nexport_path="{PRESET_PATH}"\n',
     )
-    engine = tmp_path / "bin" / "engine.cmd"
-    engine.parent.mkdir()
-    engine.write_text(ENGINE, encoding="ascii", newline="")
+    engine = python_program(tmp_path / "bin", "engine", ENGINE)
 
     target = root / PRESET_PATH
     args = ["--headless", "--export-release", PRESET]

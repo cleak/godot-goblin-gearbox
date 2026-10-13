@@ -19,6 +19,7 @@ upgrade diff shows only what upstream changed.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import re
 import shutil
@@ -77,8 +78,26 @@ def _is_link(path: Path) -> bool:
 
 
 def _occupied(path: Path) -> bool:
-    """True when something is there to check or replace: not missing, not an empty folder."""
-    return path.exists() and not (path.is_dir() and not _is_link(path) and not any(path.iterdir()))
+    """True when something is there to check or replace: not missing, not an empty folder.
+    A link is something, also one that points nowhere."""
+    if _is_link(path):
+        return True
+    return path.exists() and not (path.is_dir() and not any(path.iterdir()))
+
+
+def _set_aside(spec: AddonSpec, destination: Path, backup: Path) -> None:
+    """Rename the installed addon to `backup`, in the same folder. A folder that is a mount
+    point of its own (a container volume) cannot be renamed: said in words."""
+    try:
+        destination.replace(backup)
+    except OSError as error:
+        if error.errno not in (errno.EXDEV, errno.EBUSY):
+            raise
+        raise RuntimeError(
+            f"{spec.key} at {destination} cannot be replaced whole: it is a mount point, or on "
+            f"another file system than {destination.parent} ({error.strerror}). Nothing was "
+            "changed. Install into a plain folder."
+        ) from error
 
 
 def check_replaceable(spec: AddonSpec, path: Path) -> None:
@@ -215,13 +234,13 @@ def install_payload(
         shutil.copytree(candidate, staged)
         verify_install(spec, staged, version)
 
-        had_existing = destination.exists()
+        had_existing = destination.exists() or _is_link(destination)
         if had_existing:
             check_replaceable(spec, destination)
             # Said before it happens: the folder is replaced whole, with no copy kept.
             print(f"Replacing {destination}: local edits in it are lost.")
             _carry_generated(destination, staged)
-            destination.replace(backup)
+            _set_aside(spec, destination, backup)
         try:
             staged.replace(destination)
             verify_install(spec, destination, version)

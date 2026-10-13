@@ -12,25 +12,33 @@ project folder as an argument for exactly this).
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from _gate_fixtures import PWSH, REPO, clean_env, real_godot
+from _gate_fixtures import (
+    NEEDS_PWSH,
+    PWSH,
+    REPO,
+    WINDOWS,
+    clean_env,
+    real_godot,
+    user_data_env,
+)
 
 TOOLS = REPO / "tools"
 sys.path.insert(0, str(TOOLS))
 import kit_config  # noqa: E402
 
-pytestmark = pytest.mark.skipif(os.name != "nt" or PWSH is None, reason="needs PowerShell 7")
+pytestmark = NEEDS_PWSH
 
 VALUES = (
     "godot_version",
     "godot_minor",
-    "godot_windows_sha512",
+    "godot_sha512",
     "godot_search_roots",
     "gdunit4_version",
     "gdunit4_sha256",
@@ -76,7 +84,14 @@ USABLE = {
     "an empty object": "{}",
     "the kit's own keys": json.dumps(
         {
-            "godot": {"version": "4.7.2", "windows_x86_64_sha512": "ab" * 64, "search_roots": []},
+            "godot": {
+                "version": "4.7.2",
+                "windows_x86_64_sha512": "ab" * 64,
+                "linux_x86_64_sha512": "bc" * 64,
+                "linux_arm64_sha512": "cd" * 64,
+                "macos_universal_sha512": "de" * 64,
+                "search_roots": [],
+            },
             "gdunit4": {"version": "6.1.0", "source_archive_sha256": "cd" * 32},
             "source": {"exclude": ["addons", "artifacts", "docs"], "include": ["addons/mine"]},
             "tests": {"root": "specs"},
@@ -104,7 +119,13 @@ USABLE = {
     ),
     "null and empty mean the default": json.dumps(
         {
-            "godot": {"version": "", "search_roots": None, "windows_x86_64_sha512": None},
+            "godot": {
+                "version": "",
+                "search_roots": None,
+                "windows_x86_64_sha512": None,
+                "linux_x86_64_sha512": "",
+                "macos_universal_sha512": None,
+            },
             "gdunit4": None,
             "source": {"exclude": None, "include": None},
             "tests": {"root": None},
@@ -113,6 +134,7 @@ USABLE = {
     ),
     "an empty exclude list": '{"source": {"exclude": []}}',
     "one-part version": '{"godot": {"version": "5"}}',
+    "a checksum for one download only": '{"godot": {"linux_arm64_sha512": "0123"}}',
     "a test root with dots": '{"tests": {"root": "./specs/../specs2/"}}',
     "unknown keys": '{"mine": [1, 2], "source": {"other": 3}, "Source": "not the key"}',
     # Every form of number JSON has, and text that only looks like a mistake.
@@ -195,6 +217,14 @@ BROKEN = {
     "a number for the checksum": (
         '{"gdunit4": {"source_archive_sha256": 0}}',
         'kit.json: "gdunit4.source_archive_sha256" must be a string',
+    ),
+    "a number for a download's checksum": (
+        '{"godot": {"linux_arm64_sha512": 0}}',
+        'kit.json: "godot.linux_arm64_sha512" must be a string',
+    ),
+    "the checksums are checked in the order of the downloads": (
+        '{"godot": {"search_roots": 3, "macos_universal_sha512": 1, "linux_x86_64_sha512": 2}}',
+        'kit.json: "godot.linux_x86_64_sha512" must be a string',
     ),
     "a number for the pin": (
         '{"gdunit4": {"version": 6}}',
@@ -297,6 +327,8 @@ LINK_PATHS = (
     "src",
 )
 NAMED = {"every spelling of a folder": NAMED_PATHS, "directory links": LINK_PATHS}
+# The entries of NAMED_PATHS that exist only in another letter case.
+OTHER_CASE = ("GAME/Generated", "vendor")
 
 POWERSHELL_DRIVER = r"""
 param([string]$List)
@@ -309,7 +341,7 @@ foreach ($root in (Get-Content -LiteralPath $List)) {
         $config = Get-KitConfig
         $record.godot_version = $config.GodotVersion
         $record.godot_minor = $config.GodotMinor
-        $record.godot_windows_sha512 = $config.GodotSha512
+        $record.godot_sha512 = $config.GodotSha512
         $record.godot_search_roots = @($config.GodotSearchRoots)
         $record.gdunit4_version = $config.Gdunit4Version
         $record.gdunit4_sha256 = $config.Gdunit4Sha256
@@ -327,7 +359,9 @@ foreach ($root in (Get-Content -LiteralPath $List)) {
         $asked = Join-Path $root "named_paths.txt"
         if (Test-Path -LiteralPath $asked) {
             foreach ($path in (Get-Content -LiteralPath $asked)) {
-                $pair = [ordered]@{ path = $path; found = @(); error = "" }
+                # "$path": the text alone. PowerShell 7.0 writes the notes Get-Content
+                # hangs on a line (PSPath, PSDrive, ...) into the JSON.
+                $pair = [ordered]@{ path = "$path"; found = @(); error = "" }
                 try {
                     $pair.found = @(
                         Get-KitSourceFiles -Path $path |
@@ -374,9 +408,18 @@ def _slug(name: str) -> str:
 
 
 def _link_folder(link: Path, target: Path) -> None:
-    import _winapi
+    """A directory link without admin rights: a junction on Windows, a symlink elsewhere."""
+    if WINDOWS:
+        import _winapi
 
-    _winapi.CreateJunction(str(target), str(link))
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+def _ignores_case(folder: Path) -> bool:
+    """True where the file system finds "SRC" for "src" (Windows, macOS by default)."""
+    return (folder / "SRC").is_dir() and (folder / "src").is_dir()
 
 
 def _build(root: Path, kit: str | bytes | None) -> Path:
@@ -425,6 +468,8 @@ def _python_record(root: Path, *, named: tuple[str, ...] = ()) -> dict:
         return record
     for key in VALUES:
         value = getattr(config, key)
+        if isinstance(value, Mapping):
+            value = dict(value)
         record[key] = list(value) if isinstance(value, tuple) else value
     for extensions in EXTENSION_SETS:
         suffixes = [f".{extension}" for extension in extensions.split(",")]
@@ -480,6 +525,7 @@ def godot_records(projects: dict[str, Path]) -> dict[str, dict]:
     command = [godot, "--headless", "--path", str(host), "--script", "res://probe.gd", "--"]
     done = subprocess.run(
         [*command, roots.as_posix()],
+        env=clean_env(**user_data_env(work / "user data")),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -620,10 +666,12 @@ def _named(
     pairs = powershell_records[name]["named"]
     assert [pair["path"] for pair in pairs] == list(NAMED[name])
     theirs = {pair["path"]: pair["error"] or pair["found"] for pair in pairs}
+    # Written in another letter case: found only where the file system ignores case.
+    absent = {"missing"} if _ignores_case(projects[name]) else {"missing", *OTHER_CASE}
     for path in NAMED[name]:
         if isinstance(mine[path], str):
             # Each language words its own "no such path" error; it is the same kind.
-            kind = "does not exist" if path == "missing" else "outside the project"
+            kind = "does not exist" if path in absent else "outside the project"
             assert kind in mine[path] and kind in theirs[path], (path, mine[path], theirs[path])
         else:
             assert sorted(theirs[path]) == sorted(mine[path]), path
@@ -648,7 +696,12 @@ def test_a_path_asked_for_by_name_gives_the_same_files_in_python_and_powershell(
         "game/generated/made.gd",
     ]
     assert mine["game/generated/deep"] == ["game/generated/deep/deep.gd"]
-    assert mine["GAME/Generated"] and mine["vendor"] == ["Vendor/lib.gd"]
+    if _ignores_case(projects["every spelling of a folder"]):
+        # Found, and listed as it is spelled on disk.
+        assert sorted(mine["GAME/Generated"]) == sorted(mine["game/generated"])
+        assert mine["vendor"] == ["Vendor/lib.gd"]
+    else:
+        assert "does not exist" in mine["GAME/Generated"] and "does not exist" in mine["vendor"]
     assert mine["src/notes.txt"] == [] and mine["src/a.gd"] == ["src/a.gd"]
     # Named or not, what Godot does not scan stays out.
     assert mine["export"] == ["export/built.gd"] and mine[".hidden"] == [".hidden/secret.gd"]
@@ -695,9 +748,17 @@ def test_gdscript_reads_its_own_project_by_default(tmp_path: Path) -> None:
     (root / "probe.gd").write_text(probe, encoding="utf-8", newline="\n")
     command = [godot, "--headless", "--path", str(root), "--script", "res://probe.gd"]
 
+    env = clean_env(**user_data_env(tmp_path / "user data"))
+
     def run() -> tuple[list, str]:
         done = subprocess.run(
-            command, capture_output=True, text=True, encoding="utf-8", timeout=120, check=False
+            command,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=120,
+            check=False,
         )
         lines = [line[4:] for line in done.stdout.splitlines() if line.startswith("OWN ")]
         assert done.returncode == 0 and len(lines) == 1, done.stdout + done.stderr

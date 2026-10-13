@@ -1,6 +1,7 @@
 # AGENTS.md
 
-Godot 4.7 Standard (non-Mono), typed GDScript, Windows, PowerShell 7, Python 3.12 via `uv`.
+Godot 4.7 Standard (non-Mono), typed GDScript, PowerShell 7 (`pwsh`), Python 3.12 via `uv`.
+Windows, Linux, macOS: `docs/platforms.md`.
 Project is the owner's and overrides Kit.
 A `(sample)` section describes the kit's sample game: while one remains the game is undecided.
 Ask the owner before inventing its design. No answer: the smallest reading, each choice reported.
@@ -86,27 +87,29 @@ pwsh ./tools/doctor.ps1          # a tool is missing or odd: prints the fix
 - Arguments of a `tools/*.gd` script go after `--user-args`, never a bare `--`.
 - Moved or renamed a file: move its `.uid` and `.import` too. `lint_project.gd --fix` (above)
   repairs scene uids and moved paths: never type a `uid://`. Commit every `*.uid`.
-- Exit 0 from `--import` proves nothing: scripts that do not compile pass it. Nor does a green
-  `check.ps1` prove the game looks or feels right (runtime loop) or a shader runs on a GPU.
+- No proof: `--import` exit 0 (broken scripts pass). A green check proves no look, feel, GPU shader.
 
 ## Runtime loop
 
-```powershell
-$env:GODOT_AGENT_SESSION = "<unique>"   # in every shell of the loop, or --session <unique>
+```sh
+$env:GODOT_AGENT_SESSION = "<unique>"   # Windows (pwsh)
 $game = Start-Process pwsh "-NoProfile -File tools/godot.ps1" -PassThru   # note $game.Id
-uv run python tools/devtools.py wait             # until the game answers
+# Linux, macOS (bash). Linux without a display: xvfb-run -a pwsh ./tools/godot.ps1 ...
+export GODOT_AGENT_SESSION="<unique>"; mkdir -p artifacts
+pwsh ./tools/godot.ps1 > artifacts/game.log 2>&1 < /dev/null &
+# Every system. A new shell has no session: set it again, or --session <unique>
+uv run python tools/devtools.py wait             # after every launch; prints the game's pid
 uv run python tools/devtools.py input sequence <tests>/sequences/<name>.json   # steps, asserts
 uv run python tools/devtools.py screenshot --filename <feature>_<state>.png
 uv run python tools/devtools.py input clear      # always, also after a failure
 uv run python tools/devtools.py quit             # always
 ```
 
-- Open the PNG and say what you see: a written file is no proof. Every capture prints
-  `Screenshot saved: <path>`, a sequence's screenshot steps included.
+- Open every PNG a capture or a sequence prints (`Screenshot saved: <path>`): say what you see.
 - A player-visible feature ships `<tests>/sequences/<name>.json`: assert state, screenshot looks.
 - `wait` warns when the game logged errors: `devtools.py logs --category error`.
-- Scripts load at launch: quit and relaunch after an edit.
-- No answer: same session as the game? `quit` unanswered: `taskkill /T /F /PID <that id>`.
+- Scripts load at launch: quit, relaunch after an edit. No answer: same session as the game?
+- `quit` unanswered: Windows `taskkill /T /F /PID <that id>`, else `kill <pid wait printed>`.
 
 ## GDScript
 
@@ -131,20 +134,17 @@ uv run python tools/devtools.py quit             # always
 
 ## Shared machine
 
-- Other agents and the owner's editor share this PC. One Godot at a time per agent: quit your
-  game before you run tests or `check.ps1`.
-- Stop only a process you started, by its id. Never by name (`Stop-Process -Name godot*`).
+- Others share this machine. One Godot per agent: quit your game before tests or `check.ps1`.
+- Stop only a process you started, by id: `pkill`, `Stop-Process -Name` end the owner's editor too.
 - Tests wait for a machine-wide slot pool (`GODOT_TEST_SLOTS`): never raise it, no `--slots 0`.
-- One worktree per agent, `setup.ps1` run in it; one `GODOT_AGENT_SESSION` per game. A session
-  has its own mailbox and its own screenshot folder: with none set, both are shared.
+- One worktree per agent. One `GODOT_AGENT_SESSION` per game, or they share mailbox and screenshots.
 
 ## Safety
 
 - Never weaken a gate to get green: no edits to `[debug]`, `.gdlintrc`, `kit.json`, CI, timeouts
   or allowlists; no deleted or skipped test; no `git commit --no-verify`. Fix the code or ask.
-- A gate that was skipped or did not run is not a pass. Never report a check you did not run.
-- `devtools/allow_mutation` stays `false`: never set it yourself. `set-state` and `run-method`
-  need it; use input and `devtools.py call`.
+- Passed: the last line has `check: PASSED`, not exit 0 alone. Never report a check you did not run.
+- Never set `devtools/allow_mutation` (`set-state`, `run-method`): use input and `devtools.py call`.
 - Never run downloaded scripts. Never commit secrets, `.env*`, `artifacts/`, `.godot/`, `.tools/`.
 
 ## Reference (open only what the task needs)
@@ -154,5 +154,6 @@ uv run python tools/devtools.py quit             # always
 | One gate alone, flags, exit codes; `kit.json`; a new input action | `docs/tools.md` |
 | Driving the game: commands, sequence steps, your own command, no answer | `docs/devtools.md` |
 | A message you do not recognise; scenes and uids; shells | `docs/gotchas.md` |
+| Linux, macOS: what differs, what was never run, stopping a game | `docs/platforms.md` |
 | A new folder or layer; what `check_architecture.py` enforces | `docs/architecture.md` |
 | Changing this file (owner) | `docs/customizing-agents-md.md` |

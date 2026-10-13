@@ -13,20 +13,24 @@ from pathlib import Path
 import pytest
 from _gate_fixtures import (
     EMPTY_CLASS_CACHE,
-    PWSH,
+    MACOS,
+    NEEDS_PWSH,
     REPO,
-    WINDOWS,
+    USER_DATA_VARIABLE,
     clean_env,
     copy_tools,
     fake_godot,
+    link_folder,
+    posix_only,
     project_godot,
     real_godot,
     run_tool,
+    user_data_env,
     write,
     write_kit_json,
 )
 
-pytestmark = pytest.mark.skipif(not WINDOWS or PWSH is None, reason="Windows PowerShell 7 gates")
+pytestmark = NEEDS_PWSH
 
 SUMMARY = "Overall Summary: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans"
 RUNNER = "GdUnitCmdTool.gd"
@@ -130,16 +134,17 @@ def test_what_gdunit_is_asked_to_run(tmp_path: Path) -> None:
 
 
 def test_the_run_gets_a_user_folder_of_its_own(tmp_path: Path) -> None:
-    """user:// lives under APPDATA. A suite that writes a save must not find, or replace,
-    the saves of the game its developer plays: tools/test_shards.py isolates every shard,
-    and the full check runs this script."""
+    """A suite that writes a save must not find, or replace, the saves of the game its
+    developer plays: tools/test_shards.py isolates every shard, and the full check runs
+    this script. The variable that moves user:// is this system's (USER_DATA_VARIABLE),
+    and only Godot gets it."""
     root, env, _ = _project(tmp_path)
     seen = tmp_path / "appdata.log"
-    mine = tmp_path / "my real appdata"
+    mine = tmp_path / "my real user data"
     mine.mkdir()
     env = _gdunit(tmp_path, env, SUMMARY) | {
         "FAKE_GODOT_APPDATA_LOG": str(seen),
-        "APPDATA": str(mine),
+        USER_DATA_VARIABLE: str(mine),
     }
     for _ in range(2):
         result = run_tool(root, "test.ps1", env=env)
@@ -147,9 +152,50 @@ def test_the_run_gets_a_user_folder_of_its_own(tmp_path: Path) -> None:
     used = [Path(line.removeprefix("appdata=").strip()) for line in seen.read_text().splitlines()]
     assert len(used) == 2 and used[0] != used[1]
     for folder in used:
-        assert folder != mine and folder.name.startswith("godot_test_user_")
+        # The folder itself, or on macOS Library/Application Support inside it.
+        own = [part for part in folder.parts if part.startswith("godot_test_user_")]
+        assert len(own) == 1 and not folder.is_relative_to(mine), folder
         assert not folder.exists()  # removed after the run
-    assert list(mine.iterdir()) == []
+    # On macOS the variable is HOME, where the PowerShell of this run keeps caches too.
+    assert MACOS or list(mine.iterdir()) == []
+
+
+@posix_only("a temp folder named by a relative path (Windows makes its own absolute)")
+def test_a_relative_temp_folder_still_gives_the_run_its_own_user_folder(tmp_path: Path) -> None:
+    """Godot ignores a relative XDG_DATA_HOME: handed one, the run would use the folder of
+    the game its developer plays, and pass."""
+    root, env, _ = _project(tmp_path)
+    seen = tmp_path / "appdata.log"
+    (tmp_path / "tmp").mkdir()  # run_tool starts the script in tmp_path
+    env = _gdunit(tmp_path, env, SUMMARY) | {"FAKE_GODOT_APPDATA_LOG": str(seen), "TMPDIR": "tmp"}
+    result = run_tool(root, "test.ps1", env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    used = Path(seen.read_text().strip().removeprefix("appdata="))
+    own = [part for part in used.parts if part.startswith("godot_test_user_")]
+    assert len(own) == 1 and used.is_relative_to(tmp_path / "tmp"), used
+    assert list((tmp_path / "tmp").iterdir()) == []  # removed after the run
+
+
+def test_the_project_may_be_reached_through_a_link(tmp_path: Path) -> None:
+    """A checkout under a linked folder has two spellings, and a shell on Linux starts the
+    script by the real one whatever the user typed. An absolute -Test in either spelling
+    names the same suite."""
+    root, env, log = _project(tmp_path)
+    env = _gdunit(tmp_path, env, SUMMARY)
+    link = tmp_path / "link to the project"
+    link_folder(link, root)
+    suite = Path("test") / "unit" / "test_x.gd"
+    for started, given in ((root, link / suite), (link, root / suite), (link, link / suite)):
+        log.unlink(missing_ok=True)
+        result = run_tool(started, "test.ps1", "-Test", str(given), env=env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert log.read_text().strip().endswith("-a res://test/unit/test_x.gd -c"), given
+    # What is not there is "not found", in either spelling; what is outside stays outside.
+    missing = run_tool(root, "test.ps1", "-Test", str(link / "test" / "nope"), env=env)
+    assert missing.returncode == 1 and "Test path not found" in missing.stdout, missing.stdout
+    outside = run_tool(link, "test.ps1", "-Test", str(tmp_path / "bin"), env=env)
+    assert outside.returncode == 1, outside.stdout + outside.stderr
+    assert "is not a path inside the project" in outside.stdout
 
 
 @pytest.mark.parametrize("test_root", ["specs", "res://specs", "specs/"])
@@ -246,7 +292,8 @@ def test_real_gdunit4_in_a_folder_with_spaces_and_brackets(tmp_path: Path) -> No
     write(root / "project.godot", project_godot())
     shutil.copytree(REPO / "addons" / "gdUnit4", root / "addons" / "gdUnit4")
     write(root / "test" / "unit" / "test_ok.gd", PASSING_SUITE)
-    env = clean_env(GODOT_BIN=godot)
+    # The run's own user:// is test.ps1's doing; the import before it is this test's.
+    env = clean_env(GODOT_BIN=godot, **user_data_env(tmp_path / "user data"))
 
     passed = run_tool(root, "test.ps1", env=env, timeout=400)
     assert passed.returncode == 0, passed.stdout + passed.stderr

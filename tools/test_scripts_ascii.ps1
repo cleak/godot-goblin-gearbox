@@ -44,12 +44,16 @@ try {
             $scripts += @(Get-KitSourceFiles -Path $folder -Extensions $extensions)
         }
     }
-    $kitFiles = @(Get-KitInstalledFiles)
+    $kitFiles = Get-KitInstalledFileSet
 } catch {
     Write-Host "ASCII guard: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 }
-$scripts = @($scripts | Sort-Object FullName -Unique)
+# Sort-Object -Unique ignores letter case: on Linux a.ps1 and A.ps1 are two files.
+$seen = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::FromComparison((Get-KitPathComparison))
+)
+$scripts = @($scripts | Where-Object { $seen.Add($_.FullName) } | Sort-Object FullName)
 
 if ($scripts.Count -eq 0) {
     Write-Host "No PowerShell scripts found to check." -ForegroundColor Red
@@ -93,7 +97,7 @@ foreach ($file in $scripts) {
     $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
     # In a project the kit was installed into, only the kit's files are held to
     # the kit's own rule (no BOM at all).
-    $bomAllowed = $kitFiles.Count -gt 0 -and $kitFiles -notcontains $relative
+    $bomAllowed = $kitFiles.Count -gt 0 -and -not $kitFiles.Contains($relative)
     $bad = @()
     if ($bytes.Length -ge 2 -and (($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) -or
             ($bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF))) {

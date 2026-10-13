@@ -8,25 +8,60 @@ only; never in a headless `--script` run.
 
 ## The loop
 
+Start the game in the background, under a session name of your own: letters, digits, `_ - .`
+
+Windows, in pwsh:
+
 ```powershell
-$env:GODOT_AGENT_SESSION = "fix-lamp-1"       # your own name: letters, digits, _ - .
+$env:GODOT_AGENT_SESSION = "fix-lamp-1"
 $game = Start-Process pwsh "-NoProfile -File tools/godot.ps1" -PassThru
 $game.Id                                      # write it down: the one process you may stop
-uv run python tools/devtools.py wait          # polls until the game answers (60 s)
+```
+
+Linux, in bash (macOS: the same lines, not run):
+
+```bash
+export GODOT_AGENT_SESSION=fix-lamp-1
+mkdir -p artifacts
+pwsh ./tools/godot.ps1 > artifacts/game.log 2>&1 < /dev/null &
+```
+
+Linux without a display (an ssh session, a container): under Xvfb, in place of the last line.
+
+```bash
+xvfb-run -a pwsh ./tools/godot.ps1 > artifacts/game.log 2>&1 < /dev/null &
+```
+
+Then, on every system:
+
+```sh
+uv run python tools/devtools.py wait
 uv run python tools/devtools.py input sequence <tests>/sequences/<name>.json
 uv run python tools/devtools.py screenshot --filename lamp_lit.png
 uv run python tools/devtools.py performance
-uv run python tools/devtools.py input clear   # always, also after a failure
-uv run python tools/devtools.py quit          # always
+uv run python tools/devtools.py input clear
+uv run python tools/devtools.py quit
 ```
 
-- `pwsh ./tools/godot.ps1` blocks until the game exits. `Start-Process` returns at once; an
+- `wait` polls until the game answers (60 s) and prints its pid. The last two lines always,
+  also after a failure: `input clear` releases what a failed run left held, `quit` ends
+  the game. Each waits 5 s for a game that is gone, as `ping` does.
+- `pwsh ./tools/godot.ps1` blocks until the game exits. The launch lines return at once; an
   agent's own background mode works too.
+- `wait` after every launch. Only the game makes its mailbox, when it starts: a `ping` sent
+  before that exits 3 at once.
+- `wait` exits 3 and the game was started: its output says why. On Linux that is
+  `artifacts/game.log` (`ERROR: X11 Display is not available`, for one). `wait` cannot tell a
+  game that died at start from one still starting, and runs its whole timeout.
+- Linux: the redirects and `< /dev/null` let an ssh command or an agent's shell return while
+  the game runs. A fresh clone has no `artifacts/`. `-a` is required: plain `xvfb-run` takes
+  display 99 and fails with `xvfb-run: error: Xvfb failed to start` when it is taken.
 - The game reads `GODOT_AGENT_SESSION` when it starts, so set it before the launch. A client
   takes it from the variable or from `--session <name>`. A new shell has neither: set one.
 - One session, one game. Two games on one session answer each other's commands.
-- Open every screenshot. Each capture prints `Screenshot saved: <path>`: the `screenshot`
-  command, and every `screenshot` step of a sequence. Check: the right scene and state,
+- Open every screenshot. Each capture that was written prints `Screenshot saved: <path>`: the
+  `screenshot` command, and every `screenshot` step of a sequence. One that could not be
+  written prints `Screenshot not written: <path>` and fails. Check: the right scene and state,
   nothing clipped or off screen, text readable, the change you made visible.
 - A game with a session writes to `<user data>/screenshots/<session>/`: two sessions never
   overwrite each other's `smoke.png`. Without a session it is `<user data>/screenshots/`.
@@ -36,14 +71,38 @@ uv run python tools/devtools.py quit          # always
 - `<tests>` is `tests.root` in `kit.json` (`test`). A sequence file may live anywhere; the
   kit keeps them in `<tests>/sequences/`.
 - Scripts load at launch. After an edit: `quit`, start again.
-- `quit` got no answer: `taskkill /T /F /PID <the id you wrote down>`. It takes the game with
-  it. Never stop Godot by name.
+- `quit` got no answer. Windows: `taskkill /T /F /PID <the id you wrote down>`; it takes the
+  game with it. Linux: `kill <the pid wait printed>`, Godot's own; `xvfb-run` then removes its
+  Xvfb. Never stop Godot by name. A game that never answered `wait`:
+  [platforms.md](platforms.md#stopping-a-game).
 
-One capture without the client (starts, captures, quits; exit 0 or 1):
+The same launch in pwsh on Linux without a display. `$game` is `xvfb-run`, not Godot: its id
+is not the pid `wait` prints.
 
 ```powershell
+$env:GODOT_AGENT_SESSION = "fix-lamp-2"
+New-Item -ItemType Directory -Force artifacts | Out-Null
+$game = Start-Process xvfb-run -ArgumentList '-a','pwsh','-NoProfile','-File','tools/godot.ps1' -PassThru -RedirectStandardOutput artifacts/game.log -RedirectStandardError artifacts/game.err
+```
+
+With a display, in pwsh on Linux: the same line without `xvfb-run`. The two redirects stay.
+The Windows line without them starts the game too, but the game then holds the shell's
+output open, and a shell that is captured (an agent's tool, an ssh command) does not return
+until the game quits.
+
+```powershell
+$game = Start-Process pwsh -ArgumentList '-NoProfile','-File','tools/godot.ps1' -PassThru -RedirectStandardOutput artifacts/game.log -RedirectStandardError artifacts/game.err
+```
+
+One capture without the client (starts, captures, quits; exit 0 or 1). Linux without a
+display: `xvfb-run -a` in front.
+
+```sh
 pwsh ./tools/godot.ps1 --user-args --devtools-screenshot --devtools-screenshot-name=boot.png
 ```
+
+A game started with `--headless` needs no display and answers every command but
+`screenshot`: it renders no frames.
 
 ## Commands
 
@@ -59,13 +118,13 @@ pwsh ./tools/godot.ps1 --user-args --devtools-screenshot --devtools-screenshot-n
 | `performance` | FPS, frame times, draw calls, memory, object, node and orphan counts |
 | `validate --scene res://<scene>.tscn [--strict]` | Loads and instantiates one scene. Warns when the game has logged errors |
 | `validate-all [--strict]` | The same for every authored scene |
-| `logs [--tail <n>] [--category <name>]` | The session's DevTools log. Works without the game. Category `error`: what the engine logged. No row to show: one line on stderr says so, exit 0 |
+| `logs [--tail <n>] [--category <name>]` | The session's DevTools log, each row with its reason. Works without the game. Category `error`: what the engine logged, and the commands the game dropped. No row to show: one line on stderr says so, exit 0 |
 | `input list [--all]` | The project's actions and their keys; which are held. `--all` adds `ui_*` |
 | `input press <action> [--strength <0-1>]` | Holds an action until released |
 | `input release <action>` | |
 | `input tap <action> [--hold <s>] [--strength <0-1>]` | Press and release. At least one process frame and one physics tick |
 | `input clear` | Releases everything simulated |
-| `input sequence <file> [--timeout <s>]` | Runs a sequence file and waits for the verdict (60 s of real time). Prints the path of each screenshot it took |
+| `input sequence <file> [--timeout <s>]` | Runs a sequence file and waits for the verdict (60 s of real time). Prints the path of each screenshot it wrote |
 | `call <name> [key=value ...] [--timeout <s>]` | Any command, such as one the game registered. Values are JSON when they parse |
 | `quit [--exit-code <n>]` | Closes the game |
 | `set-state --node <path> --property <name> --value <json>` | Refused unless `devtools/allow_mutation=true`. Prints the value read back; fails when the property kept its old one (read-only, or its setter refused) |
@@ -76,11 +135,14 @@ one JSON object). Before the command only: `--project <folder>`, the game of ano
 `.claude/settings.json` pre-approves `devtools.py <command> ...`, which cannot hold it.
 
 Exit codes: 0 ok. 1 the game answered and the command failed (an assert, a missing node, a
-refusal, a scene that does not validate). 2 bad usage. 3 no answer in time. Results go to
-stdout, diagnostics to stderr.
+refusal, a scene that does not validate, a screenshot that was not written). 2 bad usage:
+arguments, an unreadable file, no `project.godot`, no user data folder, a mailbox this user
+may not write. 3 no answer in time, or at once when no game has made the session's mailbox.
+Results go to stdout, diagnostics to stderr.
 
 Node paths are relative to the current scene (`.` is its root, `Hud/Status` a child) or
-absolute (`/root/Main`). Prefer relative: Git Bash rewrites an argument that starts with `/`.
+absolute (`/root/Main`). Prefer relative: Git Bash on Windows rewrites an argument that
+starts with `/`.
 A property may be indexed: `position:x`.
 
 Several clients can use one session at once (two shells, a shell and the MCP server): every
@@ -192,8 +254,8 @@ func _on_devtools_spawn(args: Dictionary) -> Dictionary:
 
 ## Errors
 
-A windowed game prints nowhere an agent reads. DevTools records what the engine logs
-(script errors, `push_error`, scripts that do not compile):
+A game in the background prints where an agent does not look. DevTools records what the
+engine logs (script errors, `push_error`, scripts that do not compile):
 
 - `wait`, `ping`, `validate` and `validate-all` warn on stderr with the count since the game
   started.
@@ -231,7 +293,12 @@ After `--user-args` with `tools/godot.ps1`.
 
 `--devtools-validate` works headless, and needs the project folder: in an exported build it
 finds no scene. A screenshot does not work headless: that run renders nothing and the flag
-exits 1 saying so.
+exits 1 with `DevTools: screenshot failed: Nothing to capture: this run renders no frames
+(headless)`.
+
+Both start the game, so the project needs a main scene: without one `tools/godot.ps1` starts
+nothing and says `godot.ps1: no main scene: ...` (exit 1). Or name a scene in front:
+`pwsh ./tools/godot.ps1 --headless res://<scene>.tscn --user-args --devtools-validate`.
 
 ## MCP
 
@@ -243,11 +310,24 @@ only. Copy `tools/mcp/.mcp.json.example` to `.mcp.json` at the project root and 
 `ping`, `screenshot` (returns the image), `scene_tree`, `get_state`, `set_state`, `run_method`,
 `performance`, `validate_scene`, `validate_all_scenes`, `input_actions`, `input_press`,
 `input_release`, `input_tap`, `input_clear`, `input_sequence` (steps inline), `call`, `logs`,
-`quit`. A failed command and a silent game come back as a tool result with `isError`.
+`quit`. A failed command, a silent game and a mailbox nobody made or may write come back as
+a tool result with `isError`, with the CLI's text; the server keeps running. The example
+file is the same on every system.
 
 ## Files
 
-`<user data>` is `%APPDATA%\Godot\app_userdata\<config/name>\` on Windows; `ping` prints it.
+`<user data>` is where Godot keeps `user://`; `ping` prints it. `<name>` is `config/name`.
+
+| System | `<user data>` |
+|---|---|
+| Windows | `%APPDATA%\Godot\app_userdata\<name>` |
+| Linux | `$XDG_DATA_HOME/godot/app_userdata/<name>` when that is an absolute path, else `$HOME/.local/share/godot/app_userdata/<name>` |
+| macOS (from Godot's source, not run) | `$HOME/Library/Application Support/Godot/app_userdata/<name>` |
+
+The game and the client each work it out from those variables: start both in the same
+environment. Without them the client says so in one line (exit 2), for one
+`Error: APPDATA is not set, so the game's user data folder cannot be found. Run this in the
+environment the game was started in.`
 
 | Path | Holds |
 |---|---|
@@ -259,8 +339,13 @@ only. Copy `tools/mcp/.mcp.json.example` to `.mcp.json` at the project root and 
 | `<user data>/logs/godot.log` | Godot's own log |
 
 A client of your own: `<id>` is any name of letters, digits, `_` and `-`, at most 64, that no
-other client uses. Write the command under another name and rename it into place. The game
-removes leftovers when it starts, and replies nobody collected after a minute.
+other client uses. Write the command under another name and rename it into place. Never
+create the mailbox: only the game does, and a command goes in only once it is there. The
+game removes leftovers when it starts, and replies nobody collected after a minute. A game
+that is starting can take the file away before the rename: write it again, as
+`tools/devtools.py` does, up to five times.
+
+Session names that differ in letter case only are two mailboxes on Linux, one on Windows.
 
 ## Safety
 
@@ -285,9 +370,16 @@ removes leftovers when it starts, and replies nobody collected after a minute.
 
 | Symptom | Look at |
 |---|---|
-| `wait` or `ping` exits 3 | Is the game running? Same session on both sides? A debug build? Not a headless `--script` run? |
+| `No response: no game has run with GODOT_AGENT_SESSION='<s>' here: its mailbox would be <folder>, and that folder does not exist` (exit 3, at once) | No game ever started on that session in this environment: a mistyped session, other letters on Linux, another `APPDATA`, `XDG_DATA_HOME` or `HOME` than the game's. `wait` after a launch polls for the folder |
+| `No response: no reply to '<action>' after <n>s` (exit 3) | The mailbox is there and no game reads it. Is the game running? Same session? A debug build? Not a headless `--script` run? `ping`, `quit` and `input clear` wait 5 s, the others 30 s or their `--timeout` |
+| `wait`: `the game did not answer within <n>s ... If it was started, its output says why` | The game died at start or is still starting. Read `artifacts/game.log`. Linux without a display: `xvfb-run -a` |
+| `godot.ps1: no display: DISPLAY and WAYLAND_DISPLAY are not set` | Linux, no display. `xvfb-run -a` in front, or `--headless` |
+| `godot.ps1: no main scene: project.godot sets no application/run/main_scene` | The project has no game to start. Set a main scene in the editor, or name one: `pwsh ./tools/godot.ps1 res://<scene>.tscn` |
+| `Error: cannot write the mailbox <folder>: Permission denied` (exit 2, at once) | The mailbox takes no new file: the game runs as another user, or an access rule forbids it. After the colon is the system's own reason: a full disk says so |
 | `input tap` changes nothing | Code that reads keys, not actions. A wrong action name fails with `Unknown action: <name>. List them: devtools.py input list` |
 | Old behaviour after an edit | The game was not restarted |
-| `Nothing to capture` | A headless run renders no frames. Start the game without `--headless` |
+| `Nothing to capture: this run renders no frames (headless)` | Start the game without `--headless`; on Linux without a display, under `xvfb-run -a` |
+| `Nothing to capture: the window is not drawing. It is minimized, or on macOS covered by another window, on another Space, or behind a locked screen` | The window draws no frame. Restore it; on macOS (from Godot's source, not run) uncover it, switch to its Space, unlock the screen |
+| `Screenshot not written: <path>` | The folder cannot be written. In `--json` that step's row is `"status": "error"` |
 | `--node /root/Main` is not found from Git Bash | The shell rewrote the path. Use a relative path, or PowerShell |
 | The game cannot be reached at all | Run every other gate. Report the runtime check as not run, with the command and its output |

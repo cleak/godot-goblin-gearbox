@@ -6,13 +6,18 @@ import base64
 import importlib.util
 import io
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
+from _running_game import running_game
 
 ROOT = Path(__file__).resolve().parents[2]
 SERVER_PATH = ROOT / "tools" / "mcp" / "server.py"
@@ -158,7 +163,9 @@ class ToolTests(unittest.TestCase):
             "data": {
                 "sequence_id": "seq",
                 "status": "passed",
-                "results": [{"step": 0, "type": "screenshot", "result": {"path": path}}],
+                "results": [
+                    {"step": 0, "type": "screenshot", "status": "ok", "result": {"path": path}}
+                ],
             },
         }
         with (
@@ -186,6 +193,40 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(send.call_count, 3)
         self.assertFalse(answered["isError"])
         self.assertTrue(gave_up["isError"])
+        mailbox = devtools.get_mailbox_paths(devtools.get_user_data_path(ROOT))["root"]
+        self.assertIn(f"Its mailbox would be {mailbox}", gave_up["content"][0]["text"])
+        # A game that died while starting is silent too: its own output is where to look.
+        self.assertIn("If it was started, its output says why", gave_up["content"][0]["text"])
+
+    def test_a_mailbox_nobody_made_or_nobody_can_write_is_an_error_result(self) -> None:
+        """Neither ends the server: the request after it is answered."""
+        ping = request("tools/call", {"name": "ping", "arguments": {}}, 1)
+        wait = request("tools/call", {"name": "wait", "arguments": {"timeout": 0.2}}, 2)
+        lines = [json.dumps(message) for message in (ping, wait, request("tools/list", None, 3))]
+        with tempfile.TemporaryDirectory() as temporary:
+            user_data = Path(temporary) / "user"
+            mailbox = devtools.get_mailbox_paths(user_data)["root"]
+            with patch.object(devtools, "get_user_data_path", return_value=user_data):
+                nobody = io.StringIO()
+                server.serve(ROOT, lines, nobody)
+                self.assertFalse(user_data.exists())
+                mailbox.mkdir(parents=True)
+                refusal = PermissionError(13, "Permission denied")
+                with patch.object(devtools, "atomic_write_json", side_effect=refusal):
+                    locked = io.StringIO()
+                    server.serve(ROOT, lines, locked)
+        for out, said in (
+            (nobody, f"its mailbox would be {mailbox}, and that folder does not exist"),
+            (locked, f"cannot write the mailbox {mailbox}: Permission denied"),
+        ):
+            replies = [json.loads(line) for line in out.getvalue().splitlines()]
+            self.assertEqual([reply["id"] for reply in replies], [1, 2, 3])
+            self.assertTrue(replies[0]["result"]["isError"])
+            self.assertIn(said, replies[0]["result"]["content"][0]["text"])
+            self.assertTrue(replies[1]["result"]["isError"])
+            self.assertEqual(len(replies[2]["result"]["tools"]), len(server.TOOLS))
+        waited = json.loads(locked.getvalue().splitlines()[1])["result"]["content"][0]["text"]
+        self.assertIn(f"cannot write the mailbox {mailbox}", waited)
 
     def test_input_sequence_waits_for_the_end_and_clears_inputs_on_failure(self) -> None:
         started = {"success": True, "message": "started", "data": {"sequence_id": "seq"}}
@@ -244,6 +285,83 @@ class StdioTests(unittest.TestCase):
         self.assertEqual([reply["id"] for reply in replies], [1, 2])
         self.assertEqual(replies[0]["result"]["protocolVersion"], "2025-06-18")
         self.assertGreaterEqual(len(replies[1]["result"]["tools"]), 18)
+
+
+def converse(command: list[str], messages: list[dict], **how: object) -> list[dict]:
+    """Start a server, send it `messages` over stdin, and return what it answered."""
+    completed = subprocess.run(
+        command,
+        input="".join(json.dumps(message) + "\n" for message in messages).encode("utf-8"),
+        capture_output=True,
+        timeout=180,
+        check=False,
+        **how,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
+    assert b"\r" not in completed.stdout
+    return [json.loads(line) for line in completed.stdout.decode("utf-8").splitlines()]
+
+
+def test_the_example_starts_the_server_as_it_is_written() -> None:
+    """An MCP client starts the server from the project root, without a shell: the same
+    line has to work on every system."""
+    example = json.loads((ROOT / "tools" / "mcp" / ".mcp.json.example").read_text("utf-8"))
+    entry = example["mcpServers"]["godot-devtools"]
+    assert list(entry["env"]) == [devtools.SESSION_ENV]
+    script = entry["args"][-1]
+    assert "\\" not in script and (ROOT / script) == SERVER_PATH
+    program = shutil.which(entry["command"])
+    if program is None:
+        pytest.skip(f"needs {entry['command']} on PATH")
+    replies = converse(
+        [program, *entry["args"]],
+        [
+            request("initialize", {"protocolVersion": "2025-06-18"}, 1),
+            request("tools/list", None, 2),
+        ],
+        cwd=ROOT,
+        env=os.environ | entry["env"],
+    )
+    assert [reply["id"] for reply in replies] == [1, 2]
+    assert replies[0]["result"]["serverInfo"]["name"] == "godot-devtools"
+    assert len(replies[1]["result"]["tools"]) == len(server.TOOLS)
+
+
+@pytest.mark.real_godot
+def test_the_server_reaches_a_real_game_on_this_system(tmp_path: Path) -> None:
+    """Over stdio, with the environment of the game: the server finds its mailbox."""
+
+    def tool(number: int, name: str, arguments: dict | None = None) -> dict:
+        return request("tools/call", {"name": name, "arguments": arguments or {}}, number)
+
+    with running_game(tmp_path, "mcp") as game:
+        replies = converse(
+            [sys.executable, str(SERVER_PATH), "--project", str(game.project)],
+            [
+                request("initialize", {"protocolVersion": "2025-06-18"}, 1),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                tool(2, "wait", {"timeout": 90}),
+                tool(3, "ping"),
+                tool(4, "input_tap", {"action": "ui_accept"}),
+                tool(5, "get_state", {"node_path": "."}),
+                tool(6, "screenshot", {"filename": "nothing.png"}),
+                tool(7, "quit"),
+            ],
+            env=game.env,
+        )
+        assert [reply["id"] for reply in replies] == [1, 2, 3, 4, 5, 6, 7], game.output()
+        results = {reply["id"]: reply["result"] for reply in replies}
+        assert not results[2]["isError"], results[2]["content"][0]["text"] + game.output()
+        game_said = results[3]["structuredContent"]["data"]
+        assert game_said["session"] == "mcp"
+        assert Path(game_said["user_dir"]).is_relative_to(game.user_data)
+        assert not results[4]["isError"]
+        assert results[5]["structuredContent"]["data"]["presses"] == 1
+        # A headless game renders no frame: an error result with the reason, and no image.
+        assert results[6]["isError"] and len(results[6]["content"]) == 1
+        assert "Nothing to capture" in results[6]["content"][0]["text"]
+        assert not results[7]["isError"]
+        assert game.process.wait(timeout=60) == 0, game.output()
 
 
 if __name__ == "__main__":

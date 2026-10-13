@@ -8,9 +8,8 @@ from pathlib import Path
 
 import pytest
 from _gate_fixtures import (
-    PWSH,
+    NEEDS_PWSH,
     REPO,
-    WINDOWS,
     clean_env,
     copy_tools,
     fake_godot,
@@ -20,7 +19,7 @@ from _gate_fixtures import (
     write_kit_json,
 )
 
-pytestmark = pytest.mark.skipif(not WINDOWS or PWSH is None, reason="Windows PowerShell 7 gates")
+pytestmark = NEEDS_PWSH
 
 # tools/godot.ps1 is not here: it forwards whatever it is given to Godot.
 GATES = [

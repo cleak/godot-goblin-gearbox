@@ -17,7 +17,9 @@ One line per finding, `<file>:<line>: <problem>`:
   under `tools/`, `docs/`, `addons/`, `test/` or another top-level folder of the project,
   and any other word with a `/` that ends in `/` or in a file ending (`src/sim/`,
   `src/player.gd`), with or without `./` or `res://` in front (so the script of every
-  command shown). Upper and lower case must match.
+  command shown). Upper and lower case must match: a path that is there in other letters
+  (`Docs/` for `docs/`, which Windows and macOS open all the same) is reported as
+  `is spelled ... in the project`.
 - Files. A bare file name in a code span or a code block (`kit.json`, `check.ps1`) that
   is neither at the project root nor the name of any file in the project. A dot-file
   that is not at the project root: the kit's own (`.gdlintrc`, `.gitignore`, ...) and any
@@ -123,6 +125,44 @@ def exists_exact(root: Path, relative: str) -> bool:
     return True
 
 
+def other_spelling(root: Path, relative: str) -> str:
+    """`relative` as the project spells it, when it is there in other letters (`Docs/x.md`
+    for `docs/x.md`); "" when it is spelled the same or is not there at all."""
+    current = root
+    spelled: list[str] = []
+    for part in relative.split("/"):
+        if part in ("", "."):
+            spelled.append(part)
+            continue
+        if part == "..":
+            current = current.parent
+            spelled.append(part)
+            continue
+        try:
+            names = os.listdir(current)
+        except OSError:
+            return ""
+        same = [name for name in names if name.lower() == part.lower()]
+        if not same:
+            return ""
+        spelled.append(part if part in same else same[0])
+        current = current / spelled[-1]
+    found = "/".join(spelled)
+    return "" if found == relative else found
+
+
+def missing(root: Path, relative: str) -> str:
+    """What is wrong with a path that exists_exact() does not find."""
+    other = other_spelling(root, relative)
+    if other:
+        # Windows and macOS open either; Linux and git do not.
+        return (
+            f"is spelled `{other}` in the project: make the two spellings match "
+            "(upper and lower case count)"
+        )
+    return "does not exist in the project"
+
+
 class Project:
     """What the page's paths are checked against."""
 
@@ -200,7 +240,7 @@ class Project:
                 return ""
             if first.lower() not in self.top_folders() or exists_exact(self.root, folder):
                 return ""
-            return f"`{folder}` (in front of a placeholder) does not exist in the project"
+            return f"`{folder}` (in front of a placeholder) {missing(self.root, folder)}"
         text = word.strip().rstrip(".:,")
         text = LINE_SUFFIX.sub("", text).replace("\\", "/")
         if text.startswith("res://"):
@@ -222,7 +262,7 @@ class Project:
                 return ""
             if exists_exact(self.root, text):
                 return ""
-            return f"`{text}` does not exist in the project"
+            return f"`{text}` {missing(self.root, text)}"
         if text.startswith("."):
             low = text.lower()
             named = low.endswith(FILE_SUFFIXES) and low not in FILE_SUFFIXES
@@ -249,6 +289,9 @@ def _link_problem(target: str, page: Path, project: Project) -> str:
         return ""
     if exists_exact(page.parent, path):
         return ""
+    other = other_spelling(page.parent, path)
+    if other:
+        return f"link to `{path}`, which is spelled `{other}` on disk (upper and lower case count)"
     return f"link to `{path}`, which does not exist (links are relative to this page)"
 
 

@@ -3,20 +3,30 @@
 # Usage:
 #   pwsh ./tools/install_godot.ps1           # install; does nothing when already there
 #   pwsh ./tools/install_godot.ps1 -Force    # download and install again
-#   pwsh ./tools/install_godot.ps1 -Source D:\downloads\Godot_v4.7.2-stable_win64.exe.zip
+#   pwsh ./tools/install_godot.ps1 -Source ~/Downloads/Godot_v4.7.2-stable_linux.x86_64.zip
 #
 # What it does:
 # - Takes the version from kit.json godot.version and downloads the official
-#   Windows x86_64 standard build from the godotengine/godot GitHub release.
+#   standard build for this machine from the godotengine/godot GitHub release:
+#     Windows x86_64   Godot_v<version>-stable_win64.exe.zip
+#     Linux x86_64     Godot_v<version>-stable_linux.x86_64.zip
+#     Linux arm64      Godot_v<version>-stable_linux.arm64.zip
+#     macOS            Godot_v<version>-stable_macos.universal.zip
 #   -Source names another URL or a local zip (a mirror, an offline machine).
-# - Checks the archive's SHA-512 against kit.json godot.windows_x86_64_sha512.
-#   A mismatch is refused, and so is an empty pin: nothing unverified is
-#   installed unless -SkipChecksum says so.
-# - Extracts to .tools/godot/Godot_v<version>-stable_win64/ (gitignored), the
-#   first place tools/godot_resolver.ps1 looks after GODOT_BIN and GODOT4_EXE.
+# - Checks the archive's SHA-512 against kit.json godot.<build>_sha512 (build:
+#   windows_x86_64, linux_x86_64, linux_arm64, macos_universal) before anything
+#   is unpacked. A mismatch is refused, and so is an empty pin: nothing
+#   unverified is installed unless -SkipChecksum says so.
+# - Extracts to .tools/godot/Godot_v<version>-stable_<tag>/ (gitignored), the
+#   first place tools/godot_resolver.ps1 looks after GODOT_BIN and GODOT4_EXE,
+#   makes the program executable (Linux, macOS), and runs its --version: an
+#   install that does not answer with the pinned version is removed again.
 #
-# To move to another Godot version: change godot.version and the SHA-512 (from
-# the release's SHA512-SUMS.txt) in kit.json, then run this again.
+# -Platform (windows, linux, macos) and -Architecture (x86_64, arm64) name
+# another system's download. The program must still run on this machine.
+#
+# To move to another Godot version: change godot.version and the four SHA-512
+# values (from the release's SHA512-SUMS.txt) in kit.json, then run this again.
 #
 # Exit codes: 0 = installed or already installed, 1 = refused or failed.
 #Requires -Version 7.0
@@ -25,7 +35,9 @@
 param(
     [switch]$Force,
     [switch]$SkipChecksum,
-    [string]$Source = ""
+    [string]$Source = "",
+    [string]$Platform = "",
+    [string]$Architecture = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,6 +61,48 @@ function Test-InstalledGodot {
     return $probe.Code -eq 0 -and $probe.Text.StartsWith("$Version.", [System.StringComparison]::Ordinal)
 }
 
+function Find-ArchivePayload {
+    # The folder under -Staging that holds every one of -Files (paths relative
+    # to it), or "" when there is none. The official archives hold them at
+    # their top level.
+    param([string]$Staging, [string[]]$Files)
+    $leaf = [System.IO.Path]::GetFileName($Files[0])
+    $depth = $Files[0].Split('/').Count
+    foreach ($hit in (Get-ChildItem -LiteralPath $Staging -Recurse -File | Where-Object { $_.Name -ceq $leaf })) {
+        $folder = $hit.FullName
+        for ($step = 0; $step -lt $depth; $step++) { $folder = [System.IO.Path]::GetDirectoryName($folder) }
+        $missing = @($Files | Where-Object { -not (Test-Path -LiteralPath (Join-Path $folder $_) -PathType Leaf) })
+        if ($missing.Count -eq 0) { return $folder }
+    }
+    return ""
+}
+
+function Set-KitExecutable {
+    # Linux, macOS: the owner, the group and everyone else may execute -FilePath.
+    # An unzip that does not carry the permission over leaves a program that
+    # cannot start. Done by the system's chmod: PowerShell 7.0 has no call for it.
+    param([string]$FilePath)
+    if ((Get-KitPlatform) -eq "windows") { return }
+    $chmod = Get-Command chmod -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $program = if ($chmod) { $chmod.Source } else {
+        # A PATH without the system's folders.
+        @("/bin/chmod", "/usr/bin/chmod") | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+            Select-Object -First 1
+    }
+    if (-not $program) {
+        Stop-Install "chmod not found, so '$FilePath' cannot be made executable; nothing was installed."
+    }
+    $run = Invoke-KitProcess -FilePath $program -Arguments @("a+x", $FilePath) -TimeoutSeconds 30
+    if ($run.Code -ne 0) {
+        Stop-Install "chmod a+x '$FilePath' failed ($($run.Text)); nothing was installed."
+    }
+}
+
+# Before anything is downloaded: PowerShell 7.0 and 7.1 abort at the checksum
+# where only OpenSSL 3 is installed, and no script can catch that.
+$refusal = Get-KitPowerShellRefusal
+if ($refusal) { Stop-Install $refusal }
+
 try {
     $config = Get-KitConfig
 } catch {
@@ -58,40 +112,46 @@ $version = $config.GodotVersion
 if ($version -notmatch '^\d+\.\d+(\.\d+)?$') {
     Stop-Install "kit.json godot.version '$version' is not a release version like 4.7.2."
 }
-if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
-    Stop-Install "only the Windows x86_64 build is installed by this script. Install Godot $version yourself and set GODOT_BIN."
+if (-not $Platform) { $Platform = Get-KitPlatform }
+if (-not $Architecture) { $Architecture = Get-KitArchitecture }
+if ($Platform -cnotin @("windows", "linux", "macos")) {
+    Stop-Install "-Platform must be windows, linux or macos; it is '$Platform'."
+}
+$release = Get-KitGodotRelease -Version $version -Build (Get-KitGodotBuild -Platform $Platform -Architecture $Architecture)
+if ($null -eq $release) {
+    Stop-Install ("Godot publishes no build for $Platform $Architecture. Build or install Godot $version " +
+        "yourself and set GODOT_BIN to its executable.")
 }
 
-$name = "Godot_v$version-stable_win64"
-$archiveName = "$name.exe.zip"
+$name = $release.Name
+$archiveName = $release.Archive
 $installRoot = [System.IO.Path]::GetFullPath((Join-Path $config.Root ".tools/godot"))
 $destination = Join-Path $installRoot $name
-$console = Join-Path $destination "${name}_console.exe"
-$editor = Join-Path $destination "$name.exe"
+$program = [System.IO.Path]::GetFullPath((Join-Path $destination $release.Executable))
+$holds = $release.Files -join " and "
 
-if (-not $Force -and (Test-Path -LiteralPath $console -PathType Leaf) -and
-    (Test-Path -LiteralPath $editor -PathType Leaf)) {
-    if (Test-InstalledGodot -Executable $console -Version $version) {
-        Write-Host "Godot $version is already installed: $console" -ForegroundColor Green
+$present = @($release.Files | Where-Object { Test-Path -LiteralPath (Join-Path $destination $_) -PathType Leaf })
+if (-not $Force -and $present.Count -eq $release.Files.Count) {
+    if (Test-InstalledGodot -Executable $program -Version $version) {
+        Write-Host "Godot $version is already installed: $program" -ForegroundColor Green
         exit 0
     }
     Write-Host "The Godot in '$destination' does not run as $version; installing it again." -ForegroundColor Yellow
 }
 
-$expected = $config.GodotSha512.Trim().ToLowerInvariant()
+$pin = "kit.json $($release.ChecksumKey)"
+$expected = $config.GodotSha512[$release.Build].Trim().ToLowerInvariant()
 if ($SkipChecksum) {
     Write-Host "WARNING: -SkipChecksum: the archive will be installed without verification." -ForegroundColor Yellow
 } elseif (-not $expected) {
-    Stop-Install ("kit.json godot.windows_x86_64_sha512 is empty, so the download cannot be verified. " +
+    Stop-Install ("$pin is empty, so the download cannot be verified. " +
         "Add the SHA-512 of $archiveName (the release's SHA512-SUMS.txt lists it), " +
         "or pass -SkipChecksum to install it unverified.")
 } elseif ($expected -notmatch '^[0-9a-f]{128}$') {
-    Stop-Install "kit.json godot.windows_x86_64_sha512 is not a SHA-512 (128 hex digits)."
+    Stop-Install "$pin is not a SHA-512 (128 hex digits)."
 }
 
-if (-not $Source) {
-    $Source = "https://github.com/godotengine/godot/releases/download/$version-stable/$archiveName"
-}
+if (-not $Source) { $Source = $release.Url }
 
 # Everything happens in a scratch folder next to the destination; the install
 # appears only when the verified archive is fully extracted.
@@ -120,8 +180,8 @@ try {
         $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA512).Hash.ToLowerInvariant()
         if ($actual -ne $expected) {
             Stop-Install ("SHA-512 mismatch for $archiveName; nothing was installed.`n" +
-                "  expected (kit.json): $expected`n" +
-                "  actual:              $actual")
+                "  expected ($pin): $expected`n" +
+                "  actual: $actual")
         }
         Write-Host "  SHA-512 matches kit.json." -ForegroundColor DarkGray
     }
@@ -139,7 +199,7 @@ try {
         foreach ($entry in $zip.Entries) {
             if (-not $entry.Name) { continue }  # a folder entry
             $target = [System.IO.Path]::GetFullPath((Join-Path $staging $entry.FullName))
-            if (-not $target.StartsWith($stagingPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if (-not $target.StartsWith($stagingPrefix, (Get-KitPathComparison))) {
                 Stop-Install "archive entry '$($entry.FullName)' points outside the install folder; nothing was installed."
             }
             [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($target)) | Out-Null
@@ -149,12 +209,11 @@ try {
         $zip.Dispose()
     }
 
-    # The official archive holds the two executables at its top level.
-    $found = Get-ChildItem -LiteralPath $staging -Recurse -File -Filter "${name}_console.exe" | Select-Object -First 1
-    if (-not $found -or -not (Test-Path -LiteralPath (Join-Path $found.DirectoryName "$name.exe") -PathType Leaf)) {
-        Stop-Install "the archive does not hold $name.exe and ${name}_console.exe; nothing was installed."
+    $payload = Find-ArchivePayload -Staging $staging -Files $release.Files
+    if (-not $payload) {
+        Stop-Install "the archive does not hold $holds; nothing was installed."
     }
-    $payload = $found.DirectoryName
+    Set-KitExecutable (Join-Path $payload $release.Executable)
 
     # Rename the old install aside first: a rename fails as a whole when that
     # Godot is still running, where a delete would stop halfway.
@@ -174,17 +233,17 @@ try {
         Stop-Install "could not move the new install into '$destination': $($_.Exception.Message)"
     }
 
-    if (-not (Test-InstalledGodot -Executable $console -Version $version)) {
+    if (-not (Test-InstalledGodot -Executable $program -Version $version)) {
         # Leave no broken install behind; put the previous one back.
         Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction SilentlyContinue
         if ($retired) { Move-Item -LiteralPath $retired -Destination $destination }
-        Stop-Install "the archive's ${name}_console.exe does not run as Godot $version; nothing was installed."
+        Stop-Install "the archive's $($release.Executable) does not run as Godot $version here; nothing was installed."
     }
 } finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host "Godot $version installed: $console" -ForegroundColor Green
+Write-Host "Godot $version installed: $program" -ForegroundColor Green
 foreach ($override in @("GODOT_BIN", "GODOT4_EXE")) {
     $value = [System.Environment]::GetEnvironmentVariable($override)
     if ($value) {

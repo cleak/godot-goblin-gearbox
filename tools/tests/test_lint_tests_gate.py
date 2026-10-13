@@ -4,15 +4,15 @@ Which script is a suite is tools/ci/suites.py's answer (the test runner's rule),
 case here starts one real `uv run python`.
 """
 
-import os
 import shutil
 import sys
 from pathlib import Path
 
-import pytest
 from _gate_fixtures import (
-    PWSH,
+    NEEDS_PWSH,
+    NEEDS_UV,
     REPO,
+    bare_path,
     clean_env,
     copy_python_tools,
     copy_tools,
@@ -26,9 +26,7 @@ sys.path.insert(0, str(REPO / "tools" / "ci"))
 import kit_config  # noqa: E402
 import suites  # noqa: E402
 
-pytestmark = pytest.mark.skipif(
-    PWSH is None or shutil.which("uv") is None, reason="needs PowerShell 7 (pwsh) and uv"
-)
+pytestmark = [NEEDS_PWSH, NEEDS_UV]
 
 # Everything a well-formed suite may look like: blank lines and comments inside a body, a
 # signature that spans lines, a one-line test, a shared assertion helper, mock verification.
@@ -195,8 +193,7 @@ def test_it_says_what_is_missing_when_it_cannot_ask(tmp_path: Path) -> None:
     """No uv, or no tools/ci/suites.py: one line each, never a pass and never a guess."""
     root = _project(tmp_path)
     write(root / "test" / "test_clean.gd", CLEAN_SUITE)
-    system32 = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32"
-    no_uv = run_tool(root, "lint_tests.ps1", env=clean_env(PATH=str(system32)))
+    no_uv = run_tool(root, "lint_tests.ps1", env=clean_env(PATH=bare_path()))
     assert no_uv.returncode == 2, no_uv.stdout + no_uv.stderr
     assert "Test lint: uv not found" in no_uv.stdout
 

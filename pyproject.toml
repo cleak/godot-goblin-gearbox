@@ -25,6 +25,10 @@ package = false
 [tool.pytest.ini_options]
 testpaths = ["tools/tests"]
 addopts = "-q"
+# The kit's tests copy the kit into a temp folder each: half a gigabyte a run. A passing
+# test's folder goes when it ends, and one run's failures stay, until a later run fails too.
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
 
 [tool.ruff]
 target-version = "py312"

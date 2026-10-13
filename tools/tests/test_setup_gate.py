@@ -4,25 +4,30 @@ uv and Godot are stand-ins, so no network and no real install; tools/doctor.ps1 
 one. The real download path is exercised by running the script itself.
 """
 
-import os
 from pathlib import Path
 
-import pytest
 from _gate_fixtures import (
-    PWSH,
-    WINDOWS,
+    NEEDS_PWSH,
+    PLATFORM,
+    bare_path,
     clean_env,
     copy_tools,
     fake_godot,
     fake_uv,
+    old_powershell,
     ready_project,
     run_tool,
     write,
 )
 
-pytestmark = pytest.mark.skipif(not WINDOWS or PWSH is None, reason="Windows PowerShell 7 tools")
+pytestmark = NEEDS_PWSH
 
-SYSTEM32 = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32"
+# The start of the fix line for a PowerShell that cannot run the scripts.
+POWERSHELL_FIX = {
+    "windows": "winget install Microsoft.PowerShell",
+    "linux": "install the current PowerShell: https://learn.microsoft.com/",
+    "macos": "install the current PowerShell: https://learn.microsoft.com/",
+}
 
 
 def _project(tmp_path: Path) -> tuple[Path, dict[str, str]]:
@@ -32,7 +37,7 @@ def _project(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     bin_folder = tmp_path / "bin"
     fake_uv(bin_folder)
     env = clean_env(
-        PATH=str(bin_folder) + os.pathsep + str(SYSTEM32),  # the stand-in uv, and no git
+        PATH=bare_path(bin_folder),  # the stand-in uv, and no git
         GODOT_BIN=str(fake_godot(bin_folder)),
         FAKE_UV_LOG=str(tmp_path / "uv.log"),
         FAKE_GODOT_LOG=str(tmp_path / "godot.log"),
@@ -78,6 +83,18 @@ def test_missing_godot_says_how_to_get_it(tmp_path: Path) -> None:
     assert "doctor: NOT READY" in result.stdout  # the verdict is still printed
 
 
+def test_missing_uv_names_the_fix_for_this_system(tmp_path: Path) -> None:
+    root, env = _project(tmp_path)
+    result = run_tool(root, "setup.ps1", env=env | {"PATH": bare_path(tmp_path / "empty")})
+    assert result.returncode == 1, result.stdout + result.stderr
+    fix = {"windows": "winget install astral-sh.uv", "macos": "brew install uv"}.get(
+        PLATFORM, "install uv: https://docs.astral.sh/uv/getting-started/installation/"
+    )
+    assert f"uv not found. Fix: {fix}" in result.stdout
+    assert "  - uv is not installed" in result.stdout
+    assert _log(tmp_path, "uv.log") == []
+
+
 def test_failed_steps_fail_the_setup(tmp_path: Path) -> None:
     root, env = _project(tmp_path)
     sync = run_tool(root, "setup.ps1", env=env | {"FAKE_UV_SYNC_EXIT": "2"})
@@ -98,6 +115,26 @@ def test_failed_steps_fail_the_setup(tmp_path: Path) -> None:
     broken = run_tool(root, "setup.ps1", env=env)
     assert broken.returncode == 1 and "setup: kit.json is not valid JSON" in broken.stdout
     assert "Godot not found" not in broken.stdout  # the real cause, and only that
+
+
+def test_a_powershell_that_cannot_run_the_scripts_stops_setup_before_any_step(
+    tmp_path: Path,
+) -> None:
+    """PowerShell 7.0 on a Linux with OpenSSL 3 aborts at the installer's checksum, after
+    the download: setup says so in one line first, and starts nothing."""
+    root, env = _project(tmp_path)
+    del env["GODOT_BIN"]
+    write(root / "tools" / "install_godot.ps1", "Write-Host 'INSTALLER RAN'\nexit 0\n")
+    old_powershell(root, "it cannot compute a checksum")
+    result = run_tool(root, "setup.ps1", "-InstallGodot", env=env)
+    assert result.returncode == 1, result.stdout + result.stderr
+    said = result.stdout.strip().splitlines()
+    assert len(said) == 1, result.stdout
+    assert said[0].startswith("setup: PowerShell 7.")
+    assert ": it cannot compute a checksum. Fix: " in said[0]
+    assert POWERSHELL_FIX[PLATFORM] in said[0]
+    assert result.stderr.strip() == ""
+    assert _log(tmp_path, "uv.log") == [] and _log(tmp_path, "godot.log") == []
 
 
 def test_pre_commit_needs_a_git_repository(tmp_path: Path) -> None:

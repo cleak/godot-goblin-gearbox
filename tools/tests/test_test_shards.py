@@ -11,6 +11,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+import _gate_fixtures
 import pytest
 
 TOOLS = Path(__file__).resolve().parents[1]
@@ -346,13 +347,31 @@ def test_a_suite_with_only_inherited_tests_is_matched_to_its_report(project: Pat
 def test_a_path_is_res_or_project_relative_and_must_exist(project: Path) -> None:
     _write(project, {"test/unit/test_a.gd": SUITE})
     one = ["res://test/unit/test_a.gd"]
-    for spelled in ("res://test/unit", "test/unit", "test/unit/", "test/unit/test_a.gd"):
+    for spelled in (
+        "res://test/unit",
+        "res://test/unit/",
+        "test/unit",
+        "test/unit/",
+        "test/unit/test_a.gd",
+        "./test/unit",
+        # Either slash, on every system: a command line is copied from one to another.
+        "test\\unit",
+        "test\\unit\\test_a.gd",
+        str(project / "test" / "unit"),
+        "res://",
+        ".",
+    ):
         assert shards.discover([spelled]) == one, spelled
-    for missing in ("res://test/missing", "test/missing"):
+    for missing in ("res://test/missing", "test/missing", "test\\missing"):
         with pytest.raises(ValueError, match="does not exist"):
             shards.discover([missing])
+    # An absolute path is this system's own, and is not looked for under the project.
+    for outside in (str(project.parent), "res://..", "..", "test/../.."):
+        with pytest.raises(ValueError, match="outside the project"):
+            shards.discover([outside])
+    root = os.path.abspath(os.sep)
     with pytest.raises(ValueError, match="outside the project"):
-        shards.discover([str(project.parent)])
+        shards.discover([root])
 
 
 def test_the_default_root_is_kit_json_tests_root(tmp_path: Path, monkeypatch) -> None:
@@ -486,9 +505,27 @@ def test_reports_start_empty_inside_a_folder_godot_ignores(project: Path) -> Non
     assert not (project / "artifacts" / "gdunit-shards").exists()
 
 
-def test_each_shard_gets_its_own_user_data_folder(tmp_path: Path) -> None:
-    env = shards.shard_env(tmp_path / "user_3")
-    assert env["APPDATA"] == env["XDG_DATA_HOME"] == str(tmp_path / "user_3")
+def test_each_shard_gets_its_own_user_data_folder_on_every_system(tmp_path: Path) -> None:
+    """Godot 4.7 keeps user:// under %APPDATA% on Windows, $XDG_DATA_HOME on Linux and
+    $HOME/Library/Application Support on macOS, where it reads no XDG variable."""
+    mine = {"APPDATA": "roaming", "XDG_DATA_HOME": "data", "HOME": "home", "PATH": "bin"}
+    folder = tmp_path / "user_3"
+    for platform, variable in (
+        ("windows", "APPDATA"),
+        ("linux", "XDG_DATA_HOME"),
+        ("macos", "HOME"),
+    ):
+        env = shards.shard_env(folder, platform, mine)
+        # That one variable moves, and nothing else of the developer's environment.
+        assert env == mine | {variable: str(folder)}, platform
+    assert mine["HOME"] == "home"
+    # With no system named it is this one, and this process's environment.
+    here = shards.shard_env(folder)
+    moved = _gate_fixtures.USER_DATA_VARIABLE
+    assert here[moved] == str(folder)
+    assert {name: value for name, value in here.items() if name != moved} == {
+        name: value for name, value in os.environ.items() if name != moved
+    }
 
 
 def _mode(*argv: str) -> argparse.Namespace:
@@ -695,6 +732,8 @@ class FakeGroup:
     def __init__(self, clock: list[float], ends: float, code: int = 0) -> None:
         self.process = FakeProcess(clock, ends, code)
         self.killed = False
+        # What the program left running when it ended, as ProcessGroup.close names it.
+        self.left: list[str] = []
 
     def cpu_seconds(self) -> float:
         return 0.0
@@ -702,8 +741,8 @@ class FakeGroup:
     def kill(self) -> None:
         self.killed = True
 
-    def close(self) -> None:
-        pass
+    def close(self) -> list[str]:
+        return self.left
 
 
 @pytest.fixture
@@ -755,10 +794,76 @@ def test_monitor_starts_shard_clock_at_slot_acquisition(fake_run) -> None:
     assert not any(group.killed for group in groups)
 
 
-def test_a_shard_over_its_timeout_is_killed_and_the_run_exits_124(fake_run) -> None:
-    _clock, _starts, groups, _results, _state = fake_run
+def test_a_shard_over_its_timeout_is_killed_and_the_run_exits_124(fake_run, capsys) -> None:
+    _clock, starts, groups, _results, _state = fake_run
     assert shards.main([*RUN, "--timeout", "50"]) == 124
-    assert all(group.killed for group in groups)
+    # Both: the first gave its slot back when it was killed, so the second got its turn.
+    assert len(groups) == 2 and all(group.killed for group in groups)
+    assert starts[1] - starts[0] < 100.0
+    assert "no slot after" not in capsys.readouterr().out
+
+
+def test_a_slot_folder_that_breaks_under_a_run_is_one_line_and_exit_2(
+    fake_run, monkeypatch, capsys
+) -> None:
+    """Removed while the run was under way: the machine needs fixing, not a test."""
+    _clock, _starts, groups, _results, _state = fake_run
+    gone = "cannot use the test slot folder /tmp/godot_test_slots: No such file or directory."
+    asked: list[int] = []
+
+    def breaks(pool: FakePool):
+        asked.append(1)
+        if len(asked) > 1:
+            raise shards.slot_pool.SlotError(gone)
+        pool.busy = True
+        return FakeSlot(pool)
+
+    monkeypatch.setattr(FakePool, "try_acquire", breaks)
+    assert shards.main(RUN) == 2
+    said = capsys.readouterr()
+    assert said.err == gone + "\n"
+    # The shard that had started is not left running.
+    assert len(groups) == 1 and groups[0].killed
+
+
+def test_a_process_a_shard_left_running_is_named(fake_run, monkeypatch, capsys) -> None:
+    _clock, _starts, groups, _results, _state = fake_run
+    real_start = shards.start_shard
+
+    def leaky_start(godot, shard, *args, **kwargs):
+        group, log = real_start(godot, shard, *args, **kwargs)
+        if shard.index == 1:
+            group.left = ["4026946 sleep 29174", "4026950 python server.py"]
+        return group, log
+
+    monkeypatch.setattr(shards, "start_shard", leaky_start)
+    assert shards.main(RUN) == 0
+    out = capsys.readouterr().out
+    assert (
+        "  shard 1 left 2 process(es) running, now ended: 4026946 sleep 29174; "
+        "4026950 python server.py\n"
+    ) in out
+    assert "shard 0 left" not in out and len(groups) == 2
+
+
+def test_a_suite_name_held_as_escaped_bytes_is_a_setup_error(
+    project: Path, monkeypatch, capsys
+) -> None:
+    """Python with UTF-8 mode off under a locale that is not UTF-8: the name it holds is
+    not the one gdUnit4 reports, so the suite would count as never reported."""
+    _write(project, {"test/unit/test_a.gd": SUITE, "test/unit/test_é.gd": SUITE})
+    _write(project, {"addons/gdUnit4/bin/GdUnitCmdTool.gd": ""})
+    assert shards.names_are_utf8()  # here, as almost everywhere
+    assert len(shards.find_suites(["res://test"]).suites) == 2
+    monkeypatch.setattr(shards, "names_are_utf8", lambda: False)
+    with pytest.raises(ValueError, match="a file name that is not ASCII needs Python") as said:
+        shards.find_suites(["res://test"])
+    assert str(said.value).startswith("res://test/unit/test_é.gd: ")
+    assert "Fix: unset PYTHONUTF8 and PYTHONCOERCECLOCALE" in str(said.value)
+    assert shards.main(["--all"]) == 2
+    assert "a file name that is not ASCII" in capsys.readouterr().err
+    # A suite with an ASCII name is run by its path all the same.
+    assert shards.find_suites(["test/unit/test_a.gd"]).suites == ["res://test/unit/test_a.gd"]
 
 
 def test_a_suite_that_never_reports_fails_the_run(fake_run, capsys) -> None:
@@ -821,6 +926,62 @@ def test_a_script_error_beside_a_test_failure_still_prints_the_log(
     assert "FAILED ('SCRIPT ERROR' in output); log follows" in capsys.readouterr().out
 
 
+PARSE_ERROR = (
+    'SCRIPT ERROR: Parse Error: The method "dark_count()" is not present on the inferred '
+    'type "Board".'
+)
+BACKTRACE = (
+    "   GDScript backtrace (most recent call first):\n"
+    "       [0] load_with_disabled_warnings (res://addons/gdUnit4/src/core/Scanner.gd:225)\n"
+    "       [1] scan (res://addons/gdUnit4/src/core/Scanner.gd:50)\n"
+)
+# What Godot and gdUnit4 print for a suite that does not parse: the test written first.
+UNPARSED = (
+    "GdUnit4 Comandline Tool\n"
+    + f"{PARSE_ERROR}\n   at: GDScript::reload (res://test/unit/test_a.gd:67)\n{BACKTRACE}" * 2
+    + 'ERROR: Failed to load script "res://test/unit/test_a.gd" with error "Parse error".\n'
+    + f"   at: load (modules/gdscript/gdscript_resource_format.cpp:46)\n{BACKTRACE}"
+    + "Script errors were detected during test discovery!\n"
+    + '  Parse Error: The method "dark_count()" is not present on the inferred type "Board".\n'
+    + "\tat res://test/unit/test_a.gd:67\n"
+    + "Abnormal exit with 105\n"
+)
+
+
+def test_the_log_of_a_suite_that_does_not_parse_names_each_error_once(
+    fake_run, monkeypatch, capsys
+) -> None:
+    """ "Test first" starts with a suite that does not parse: its log was the same error
+    over and over, each with gdUnit4's own backtrace under it."""
+    _clock, _starts, _groups, _results, state = fake_run
+    state["code"] = 105
+    real_start = shards.start_shard
+
+    def unparsed_start(*args, **kwargs):
+        group, log = real_start(*args, **kwargs)
+        log.write_text(UNPARSED, encoding="utf-8")
+        return group, log
+
+    monkeypatch.setattr(shards, "start_shard", unparsed_start)
+    one_shard = [*RUN, "--shards", "1"]
+    assert shards.main(one_shard) == 1
+    out = capsys.readouterr().out
+    head = "shard 0 FAILED ('SCRIPT ERROR' in output); log follows, each error once (--verbose"
+    assert head in out
+    assert out.count(PARSE_ERROR) == 1 and out.count("at: GDScript::reload") == 1
+    assert out.count("Failed to load script") == 1 and "backtrace" not in out
+    assert "Scanner.gd" not in out
+    # gdUnit4's own summary, with file and line, stays.
+    assert "\tat res://test/unit/test_a.gd:67" in out and "Abnormal exit with 105" in out
+
+    assert shards.main([*one_shard, "--verbose"]) == 1
+    whole = capsys.readouterr().out
+    assert "; log follows =====" in whole and UNPARSED in whole
+    # An error without a place under it, and one in another place, are each their own.
+    kept = "ERROR: a\n   at: x (a.cpp:1)\nERROR: a\n   at: y (a.cpp:2)\nERROR: a\nERROR: a\n"
+    assert shards.without_repeats(kept) == kept.rstrip("\n")
+
+
 def test_an_interrupted_run_kills_what_it_started(fake_run, monkeypatch) -> None:
     clock, _starts, groups, _results, _state = fake_run
 
@@ -861,6 +1022,26 @@ def test_no_gdunit4_is_a_setup_error(fake_run, project: Path, capsys) -> None:
     assert shards.main(RUN) == 2
     error = capsys.readouterr().err
     assert "gdUnit4 is not installed" in error and "install_gdunit4.py" in error
+
+
+def test_a_slot_folder_that_cannot_be_used_is_a_setup_error(
+    project: Path, monkeypatch, capsys
+) -> None:
+    """Found before the first shard starts: one line and exit 2, not a traceback."""
+    _write(project, {"test/unit/test_a.gd": SUITE, "addons/gdUnit4/bin/GdUnitCmdTool.gd": ""})
+    blocked = project / "not_a_folder"
+    blocked.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GODOT_TEST_SLOT_DIR", str(blocked))
+    monkeypatch.setattr(shards.godot_binary, "resolve", lambda *_: "godot")
+    monkeypatch.setattr(shards.class_cache, "is_stale", lambda _config: False)
+    monkeypatch.setattr(shards, "start_shard", lambda *_a, **_k: pytest.fail("a shard started"))
+    assert shards.main(["--all"]) == 2
+    said = capsys.readouterr().err.strip()
+    assert said.startswith(f"cannot use the test slot folder {blocked}: ")
+    assert "Fix: make it writable, or set GODOT_TEST_SLOT_DIR" in said and "\n" not in said
+    # No limit, no folder.
+    monkeypatch.setattr(shards, "run", lambda _args, job: job.pool.count)
+    assert shards.main(["--all", "--slots", "0"]) == 0
 
 
 def test_no_godot_is_a_setup_error(fake_run, monkeypatch, capsys) -> None:

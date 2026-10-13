@@ -1,6 +1,7 @@
 # Gotchas
 
-Look up a message or a symptom; get the cause and the fix. Godot 4.7, GDScript, gdUnit4, Windows.
+Look up a message or a symptom; get the cause and the fix. Godot 4.7, GDScript, gdUnit4,
+Windows and Linux.
 
 Every row was reproduced on Godot 4.7.2 with the kit's strict warnings. Proof:
 
@@ -9,6 +10,7 @@ Every row was reproduced on Godot 4.7.2 with the kit's strict warnings. Proof:
 | `4.7.2` | A script run on Godot 4.7.2 stable, headless |
 | `kit` | The kit's own command, run on the sample game with the defect seeded |
 | `shell` | PowerShell 7.6 and Git Bash on Windows 11 |
+| `linux` | The kit's own command on Ubuntu 24.04 without a display, PowerShell 7.6 and bash |
 
 A new trap goes in as a row with its proof. One that bites every session also earns a line in
 `AGENTS.md`.
@@ -84,22 +86,40 @@ No gate reports these unless the row says so.
 
 | Symptom | Cause | Fix | Proof |
 |---|---|---|---|
-| `No response: no reply to 'ping' after 5s` (exit 3) | No game is running on that `GODOT_AGENT_SESSION` | Start the game with the same session; `uv run python tools/devtools.py wait` | `kit` |
+| `No response: no game has run with GODOT_AGENT_SESSION='<s>' here: its mailbox would be <folder>, and that folder does not exist` (exit 3, at once) | No game has started on that session in this environment. Also a `ping` sent before the game made its mailbox, a session in other letters on Linux, and a client whose `APPDATA`, `XDG_DATA_HOME` or `HOME` is not the game's | Start the game with the same session; `uv run python tools/devtools.py wait` | `kit`, `linux` |
+| `No response: no reply to 'ping' after 5s` (exit 3) | The session's mailbox is there and no game reads it: the game was stopped | Start the game with the same session; `uv run python tools/devtools.py wait` | `kit` |
+| `No response: the game did not answer within 60s ... If it was started, its output says why` from `wait` | The game died at start, or is still starting: `wait` cannot tell and runs its whole timeout | Read the game's output: `artifacts/game.log` when the launch line sent it there | `linux` |
 | `Refused: set_state needs the project setting devtools/allow_mutation=true` | Mutation is off, as shipped | Drive the game through input and its own commands. The owner turns mutation on, not an agent | `kit` |
-| `Nothing to capture: this run renders no frames (headless)` | A screenshot from a headless run | Start the game with a window | `kit` |
+| `Nothing to capture: this run renders no frames (headless)` | A screenshot from a headless run | Start the game with a window. Linux without a display: `xvfb-run -a pwsh ./tools/godot.ps1` | `kit`, `linux` |
 | `Sequence <id> failed at step 1 of 3 (counted from 0): Assertion failed: .:lit_count is 0, expected 5` and exit 1 | A sequence step failed: the second of three. Held actions are released for you | Fix the game or the expectation; the message names node and property | `kit` |
 | `Unknown action: <name>. List them: devtools.py input list` | No such input action in `project.godot` | `uv run python tools/devtools.py input list` | `kit` |
 | `[OK] Scenes valid`, yet the game is broken | A scene is valid when its own scripts attach. A script it uses by `class_name` did not compile | Read the line printed with it, `Warning: the game has logged 6 error(s) since it started`, then `uv run python tools/devtools.py logs --category error` | `kit` |
 | `pwsh ./tools/godot.ps1` never returns | It waits for the game to exit | Start it as its own process: [devtools.md](devtools.md) | `kit` |
+| A visual diff fails with `"error": "noise_mask_too_large"` | The `--noise` captures were made on another system than the baseline. Windows and Linux under Xvfb render four pixels in five a few levels apart, and any difference at all is noise: `"noise_fraction": 0.83` | Take the `--noise` captures on the system that made the baseline. Without `--noise` a capture from the other system passes the default limits | `linux` |
+
+## Linux
+
+| Symptom | Cause | Fix | Proof |
+|---|---|---|---|
+| `godot.ps1: no display: DISPLAY and WAYLAND_DISPLAY are not set, so Godot cannot open a window` (exit 1) | An ssh session, a container or a CI runner has no display | `xvfb-run -a pwsh ./tools/godot.ps1 ...`, or `--headless` when nothing has to be seen | `linux` |
+| `xvfb-run: error: Xvfb failed to start` | Plain `xvfb-run` takes display 99, and another Xvfb has it | `xvfb-run -a`: it takes the first free number | `linux` |
+| `ERROR: Can't load XCursor dynamically.` or `ERROR: Can't load Xinput2 dynamically.` in the game's output, under `xvfb-run` or with a display; the game exits 1 | Godot loads its X11 libraries as it opens a window, and `libXcursor.so.1` or `libXi.so.6` is not installed: a minimal system, a container | Debian, Ubuntu: `sudo apt install libxcursor1 libxi6 libxinerama1 libxrandr2`. Fedora: `libXcursor libXi libXinerama libXrandr` | `linux`, each library hidden in turn |
+| The game still answers after `kill <id of the background job>`; an `Xvfb` process stays | Under `xvfb-run` the background job is `xvfb-run`. Killed alone, it leaves Xvfb and the game running | `kill <the pid wait printed>`: Godot's own. Then `xvfb-run` ends its Xvfb. [platforms.md](platforms.md#stopping-a-game) | `linux` |
+| `path does not exist: <project>/Test/unit` | Linux tells `Test` from `test`. Windows runs the same command | Spell the path as it is on disk | `linux` |
+| `install: 1 name(s) in the project differ from the kit's in letter case only: 'Tools' (the kit writes 'tools')` | The project has `Tools/` where the kit writes `tools/`. Windows and macOS take the two for one name; Linux would get two folders | `git mv Tools tools`, then run the installer again | `linux` |
+| `pwsh` prints `An error has occurred that was not properly handled. Additional information is shown below. The PowerShell process will exit.`, runs nothing and exits 0, once or at every start. A gate started that way exits 0 without its `check: PASSED` line: it checked nothing | PowerShell's startup profile, one file shared by every `pwsh` of the user, is mixed. Each `pwsh` rewrites it in place as it ends, and two that end at the same moment can leave it so: 2 of 400 rounds of six. A `pwsh` that is killed writes nothing | Delete that one file: `rm ~/.cache/powershell/StartupProfileData-NonInteractive` (under `$XDG_CACHE_HOME` when that is set). Where several agents run kit scripts at once, in each shell: `export DOTNET_MultiCoreJitNoProfileGather=1`. [platforms.md](platforms.md#powershell-versions) | `linux` |
 
 ## Shells and setup
 
 | Symptom | Cause | Fix | Proof |
 |---|---|---|---|
-| `--node /root/Main` arrives as `C:/Program Files/Git/root/Main` | Git Bash rewrites an argument that starts with `/` | A relative node path (`Player`, `.`), or PowerShell | `shell` |
+| `--node /root/Main` arrives as `C:/Program Files/Git/root/Main` | Git Bash on Windows rewrites an argument that starts with `/` | A relative node path (`Player`, `.`), or PowerShell | `shell` |
 | A tool script gets no arguments | PowerShell drops a bare `--` when a script is called from a session (`& ./tools/godot.ps1 ... -- --fix`). `pwsh ./tools/godot.ps1 ... -- --fix` keeps it | Always `--user-args`: `tools/godot.ps1` turns it into `--` | `shell` |
 | `Godot 4.7 (standard build) not found`, with `Skipped: ... is a Mono build` | The `godot` on `PATH` is a Mono build | `pwsh ./tools/setup.ps1 -InstallGodot`, or set `GODOT_BIN` | `kit` |
 | The same in a new worktree, though the main checkout runs | The main checkout found its Godot through `GODOT_BIN` or `PATH`, not in its own `.tools/godot/`, which is the one place a worktree shares. `Searched:` lists every folder tried | `pwsh ./tools/setup.ps1 -InstallGodot` in the main checkout, or set `GODOT_BIN` | `kit` |
-| The session is not set in the next command | Each shell an agent opens starts clean | Set `$env:GODOT_AGENT_SESSION` again, or pass `--session <name>` | `shell` |
+| The session is not set in the next command | Each shell an agent opens starts clean | Set `GODOT_AGENT_SESSION` again (`$env:GODOT_AGENT_SESSION = "<name>"` in pwsh, `export GODOT_AGENT_SESSION=<name>` in bash), or pass `--session <name>` | `shell`, `linux` |
+| `godot.ps1: no main scene: project.godot sets no application/run/main_scene, so there is no game to run` (exit 1) | The project names no main scene, and the run asked for the game. Godot would say so in a dialog and wait for a click, with `--headless` too | Set it in the editor (Project Settings > Application > Run > Main Scene), or name a scene: `pwsh ./tools/godot.ps1 res://<scene>.tscn`. `check.ps1` lists `scenes` as `skipped` there | `kit`, `linux` |
+| `agents-md: FAILED`, with ``AGENTS.md:55: `tools/check.ps1` is spelled `Tools/check.ps1` in the project`` | Windows: the project had `Tools/` or `Docs/`, and `install.ps1` put the kit's files into it (its note said so). Godot also warns `Case mismatch opening requested file` | Rename the folder, in two steps: `git mv Tools tools-x`, then `git mv tools-x tools`. In one step git says `renaming 'Tools' failed: Invalid argument` | `kit`, `shell` |
+| `gdlint` fails with ``ImportError: `regex` module must be installed if calling `Lark(regex=True)` ``, though `doctor.ps1` says `[ok]   gdlint and gdformat in .venv` | Windows: the project's path is about 200 characters or longer, so a library under `.venv` lies past 260 and is not loaded (`DLL load failed while importing _regex: The filename or extension is too long`). `doctor.ps1` looks for the two programs and does not start them | Move the project to a shorter path, then `uv sync` | `kit`, `shell` |
 | `check: needs PowerShell 7, this is 5.1...` | Started with `powershell`, which is Windows PowerShell 5.1 | `pwsh ./tools/check.ps1` (`winget install Microsoft.PowerShell`) | `shell` |
 | `-Path` gets `A positional parameter cannot be found that accepts argument ...` | Two paths. `lint_gdscript.ps1` and `typecheck.ps1` take one | Run once per path, or name their folder | `kit` |

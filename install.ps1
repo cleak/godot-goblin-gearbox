@@ -5,9 +5,15 @@ Install or upgrade godot-goblin-gearbox in an existing Godot 4.7 project.
 .DESCRIPTION
 Run it from a clone of the kit, pointing at the game:
 
-    pwsh ./install.ps1 -Target C:\path\to\game -DryRun           # the plan; writes nothing
-    pwsh ./install.ps1 -Target C:\path\to\game
-    pwsh ./install.ps1 -Target C:\path\to\game -StrictWarnings   # also the strict type check
+    pwsh ./install.ps1 -Target path/to/game -DryRun
+    pwsh ./install.ps1 -Target path/to/game
+    pwsh ./install.ps1 -Target path/to/game -StrictWarnings
+
+-DryRun prints the plan and writes nothing. -StrictWarnings also sets up the strict type check.
+
+Windows and Linux; written for macOS and never run on one. A project the kit was installed
+into on one system is updated from another: the manifest holds forward-slash paths and
+hashes that read CRLF as LF.
 
 Commit the game first: without git there is no undo.
 
@@ -54,8 +60,32 @@ Removing it    tools/kit_manifest.json lists what to undo: "files" (the kit's), 
                (starter files) and "wrote": kit.json, gdUnit4, the starter test, each line
                added to .gitignore, and each project.godot edit (a section or line it
                added, a value it replaced as "name 1 -> 2"). Steps: README.md, "Remove it".
-Stopped        A run that stops halfway says so. Run the same command again: the manifest
-               already holds what it wrote.
+Refused        Looked for before the first write; one line, exit 1, the project as it was:
+               - A link (symbolic link, junction) on the way to a file this run writes or
+                 deletes. The kit writes no file through a link: git does not look behind
+                 one. A link the run only reads through, such as your own addons/gdUnit4,
+                 is left alone.
+               - A name that differs from the kit's in letter case only (Tools/ for
+                 tools/), where the file system keeps the two apart, as on Linux. Windows
+                 and macOS take them for one name: there the kit goes into your folder,
+                 and a note says to rename it (in two steps: git mv Tools tools-x, then
+                 git mv tools-x tools). Until then the agents-md gate fails.
+               - A file where the kit needs a folder, or a folder where it writes a file.
+               - A file this run replaces, adds to or deletes that is read-only, has no
+                 write permission, or is open in another program.
+               - PowerShell 7.0 or 7.1 on Linux or macOS: the kit's scripts need 7.2
+                 there (7.0 on Windows).
+Stopped        A run that stops halfway says so and names the file: a folder that takes no
+               new file, a full disk, on Windows a file another program has open. Ctrl+C
+               while it writes is one line ("interrupted") and exit 1. Run the same
+               command again: the manifest already holds what it wrote. Ctrl+C before
+               the first write ends it as it ends any script: nothing written, no line,
+               exit 0.
+               No file is written in place: each is written beside its place under a
+               temporary name (a dot, the name, then .kit-new) and takes its name when
+               complete. So every file of the project is whole, old or new, also after a
+               run that was killed. The next run deletes the temporary files it finds in
+               the folders the kit writes into.
 
 Exit codes: 0 installed (or dry run); 1 refused, conflicts, stopped, or an incomplete kit copy.
 #>
@@ -198,25 +228,122 @@ function Get-TreeFiles {
     if (-not [System.IO.Directory]::Exists($start)) { return $found.ToArray() }
     $all = [System.IO.SearchOption]::AllDirectories
     foreach ($file in [System.IO.Directory]::EnumerateFiles($start, "*", $all)) {
-        $relative = $file.Substring($Root.Length + 1).Replace('\', '/')
+        $relative = $file.Substring($Root.Length + 1).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
         if ($relative -match '(^|/)__pycache__/' -or $relative.EndsWith(".pyc")) { continue }
+        # What a file manager leaves in a folder it has shown.
+        if ($relative -match '(^|/)(\.DS_Store|Thumbs\.db|[Dd]esktop\.ini)$') { continue }
         $found.Add($relative)
     }
     $found.Sort([System.StringComparer]::Ordinal)
     return $found.ToArray()
 }
 
+function Get-Ordered {
+    # -Names by code point: one order on every machine, whatever its language settings.
+    param($Names)
+    $ordered = [string[]]@($Names)
+    [System.Array]::Sort($ordered, [System.StringComparer]::Ordinal)
+    return , $ordered
+}
+
+# --- Writing --------------------------------------------------------------------------
+# No file of the project is written in place. The new file is written beside it under a
+# temporary name and takes the name when complete: a write that fails part way (a full
+# disk, a killed run) leaves the file that was there, whole.
+
+$newSuffix = ".kit-new"
+
+function Get-NewName {
+    # ".<name>.kit-new" in the file's own folder: the rename never leaves the folder, and
+    # Godot does not scan a name that starts with a dot.
+    param([string]$Path)
+    $name = [System.IO.Path]::GetFileName($Path)
+    if (-not $name.StartsWith('.')) { $name = ".$name" }
+    return [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($Path), $name + $newSuffix)
+}
+
+function Remove-NewFile {
+    # A temporary file, also one with the read-only mark of the kit file it was copied from.
+    param([string]$Path)
+    $file = [System.IO.FileInfo]::new($Path)
+    if (-not $file.Exists) { return }
+    if ($file.IsReadOnly) { $file.IsReadOnly = $false }
+    $file.Delete()
+}
+
+function Stop-Write {
+    # The temporary file goes, and the error names the file it was for.
+    param([string]$Path, [string]$New, $Failure)
+    try { Remove-NewFile $New } catch { $null = $_ }   # the next run deletes what stays
+    $relative = $Path.Substring($targetRoot.Length + 1).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
+    $reason = $Failure.Exception.GetBaseException().Message
+    throw [System.IO.IOException]::new("'$relative' was not written: $reason", $Failure.Exception)
+}
+
+function Write-TargetFile {
+    # -Bytes become the file at -Path, whole or not at all.
+    param([string]$Path, [byte[]]$Bytes)
+    $new = Get-NewName $Path
+    try {
+        [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($Path)) | Out-Null
+        Remove-NewFile $new
+        $mode = [System.IO.FileMode]::CreateNew
+        if ([System.IO.File]::Exists($Path)) {
+            # A copy has the permissions of the file it replaces.
+            [System.IO.File]::Copy($Path, $new)
+            $mode = [System.IO.FileMode]::Truncate
+        }
+        $stream = [System.IO.File]::Open($new, $mode, [System.IO.FileAccess]::Write)
+        try {
+            $stream.Write($Bytes, 0, $Bytes.Length)
+            $stream.Flush($true)   # on the disk before it takes the name
+        } finally {
+            $stream.Dispose()
+        }
+        [System.IO.File]::Move($new, $Path, $true)
+    } catch {
+        Stop-Write $Path $new $_
+    }
+}
+
 function Write-TextFile {
     param([string]$Path, [string]$Text)
-    [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($Path)) | Out-Null
-    [System.IO.File]::WriteAllText($Path, $Text, $utf8)
+    Write-TargetFile $Path ($utf8.GetBytes($Text))
 }
 
 function Copy-KitFile {
-    param([string]$SourceRelative, [string]$Relative = $SourceRelative)
+    # -Staged: into a folder that itself arrives whole, so under the file's own name.
+    param([string]$SourceRelative, [string]$Relative = $SourceRelative, [switch]$Staged)
     $destination = Join-Relative $targetRoot $Relative
-    [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($destination)) | Out-Null
-    [System.IO.File]::Copy((Join-Relative $kitRoot $SourceRelative), $destination, $true)
+    $new = if ($Staged) { $destination } else { Get-NewName $destination }
+    try {
+        [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($destination)) | Out-Null
+        Remove-NewFile $new
+        [System.IO.File]::Copy((Join-Relative $kitRoot $SourceRelative), $new)
+        # The copy takes the read-only mark of a kit kept in a read-only place: the next
+        # update could not replace it.
+        $copied = [System.IO.FileInfo]::new($new)
+        if ($copied.IsReadOnly) { $copied.IsReadOnly = $false }
+        if (-not $Staged) { [System.IO.File]::Move($new, $destination, $true) }
+    } catch {
+        Stop-Write $destination $new $_
+    }
+}
+
+function Test-TargetFile {
+    # True for a file of the project that can be read. .NET says a symbolic link that
+    # points nowhere exists.
+    param([string]$Relative)
+    $path = Join-Relative $targetRoot $Relative
+    if (-not [System.IO.File]::Exists($path)) { return $false }
+    if ([System.IO.FileInfo]::new($path).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        try {
+            [System.IO.File]::OpenRead($path).Dispose()
+        } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+            return $false
+        }
+    }
+    return $true
 }
 
 function Read-JsonFile {
@@ -233,8 +360,9 @@ function Read-JsonFile {
 }
 
 function Test-NotInstalled {
-    # True for a path the kit never installs, updates or removes ($notInstalled). Names are
-    # compared as Windows compares them.
+    # True for a path the kit never installs, updates or removes ($notInstalled). Letter case
+    # is ignored on every system: a manifest may come from Windows, where tools/Tests is
+    # tools/tests, and nothing is removed on the strength of a capital letter.
     param([string]$Relative)
     $ignoreCase = [System.StringComparison]::OrdinalIgnoreCase
     foreach ($entry in $notInstalled) {
@@ -438,7 +566,7 @@ function Get-ProjectPatch {
 function Get-GitIgnorePatch {
     # The kit's entries that .gitignore lacks, and the text that adds them at its end.
     # -Bytes is the file (empty when there is none). The file is only added to: its own
-    # bytes may be in any single-byte encoding and are never written again.
+    # bytes may be in any single-byte encoding and are written back as they are.
     param([byte[]]$Bytes)
     $text = $latin1.GetString($Bytes).TrimStart([char]0xEF, [char]0xBB, [char]0xBF)   # a UTF-8 BOM
     $have = @($text -split "\r?\n" | ForEach-Object { $_.Trim().Trim('/') })
@@ -459,21 +587,26 @@ function Get-GitIgnorePatch {
 
 function Test-InsidePath {
     # True when -Relative ("tools/ci/x.txt") names a path below -Root: forward slashes only,
-    # no empty, "." or ".." part, no drive or stream colon.
+    # no empty, "." or ".." part, no drive or stream colon. The same on every system, so a
+    # manifest reads the same wherever the project is checked out.
     param([string]$Root, [string]$Relative)
     if (-not $Relative -or $Relative.IndexOfAny([char[]]@('\', ':')) -ge 0) { return $false }
     foreach ($part in $Relative.Split('/')) {
         if ($part.Trim() -eq "" -or $part.Trim('.', ' ') -eq "") { return $false }
     }
     $full = [System.IO.Path]::GetFullPath((Join-Relative $Root $Relative))
-    return $full.StartsWith($Root + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+    return $full.StartsWith($Root + [System.IO.Path]::DirectorySeparatorChar, (Get-KitPathComparison))
 }
 
 function Test-HasSuite {
     # A gdUnit4 suite under -Folder: a test_*.gd, or a script that extends GdUnitTestSuite.
     param([string]$Folder)
     if (-not [System.IO.Directory]::Exists($Folder)) { return $false }
-    $all = [System.IO.SearchOption]::AllDirectories
+    # No link is followed, as the gates follow none: a link may lead back to its own folder.
+    $all = [System.IO.EnumerationOptions]::new()
+    $all.RecurseSubdirectories = $true
+    $all.IgnoreInaccessible = $false
+    $all.AttributesToSkip = [System.IO.FileAttributes]::ReparsePoint
     foreach ($file in [System.IO.Directory]::EnumerateFiles($Folder, "*.gd", $all)) {
         if ([System.IO.Path]::GetFileName($file) -like "test_*.gd") { return $true }
         if ([System.IO.File]::ReadAllText($file) -match '(?m)^extends\s+GdUnitTestSuite\b') { return $true }
@@ -509,6 +642,9 @@ $kitGdunit = [string]$kitConfig.gdunit4.version
 $devtoolsUid = [System.IO.File]::ReadAllText((Join-Relative $kitRoot "addons/agent_devtools/dev_tools.gd.uid")).Trim()
 # The 16 strict warnings have one home: the list tools/doctor.ps1 and tools/typecheck.ps1 read.
 . (Join-Relative $kitRoot "tools/kit_config.ps1")
+# Before the first checksum: a PowerShell that cannot compute one aborts there.
+$refusal = Get-KitPowerShellRefusal
+if ($refusal) { Stop-Install $refusal }
 $strictWarningNames = @(Get-KitStrictWarnings)
 $kitHooks = [System.IO.File]::ReadAllText((Join-Relative $kitRoot ".pre-commit-config.yaml"))
 $gdtoolkitRelease = [regex]::Match($kitHooks, '(?m)^\s+rev:\s*(\S+)\s*$').Groups[1].Value
@@ -520,21 +656,43 @@ $preCommitText = $preCommitSeed.Replace("{0}", $gdtoolkitRelease).Replace("`r`n"
 # --- The target -----------------------------------------------------------------------
 
 if (-not $Target.Trim()) {
-    Stop-Install "name the game's folder:  pwsh ./install.ps1 -Target C:\path\to\game"
+    Stop-Install "name the game's folder:  pwsh ./install.ps1 -Target path/to/game"
 }
 $targetRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Target)
 $targetRoot = [System.IO.Path]::GetFullPath($targetRoot).TrimEnd('\', '/')
 $projectFile = Join-Relative $targetRoot "project.godot"
-if (-not [System.IO.File]::Exists($projectFile)) {
+if (-not (Test-TargetFile "project.godot")) {
     Stop-Install "no project.godot in '$targetRoot'. Point -Target at a Godot project; for a new game use the kit itself as the template."
 }
-$ignoreCase = [System.StringComparison]::OrdinalIgnoreCase
-if ($targetRoot.Equals($kitRoot, $ignoreCase) -or
-    $targetRoot.StartsWith($kitRoot + [System.IO.Path]::DirectorySeparatorChar, $ignoreCase)) {
-    Stop-Install "-Target is the kit itself, or a folder inside it. Point it at your own project."
+# As written, and with every link on the way followed: a link to the kit is the kit. A
+# kit folder that answers to this script's name in other letters is on a volume that takes
+# one letter case for another (Windows; macOS as it is installed): there the kit's path in
+# other letters is the kit too.
+$pathCase = Get-KitPathComparison
+$ownName = [System.IO.Path]::GetFileName($PSCommandPath)
+$otherLetters = @($ownName.ToUpperInvariant(), $ownName.ToLowerInvariant()) | Where-Object { $_ -cne $ownName }
+if ($otherLetters -and [System.IO.File]::Exists([System.IO.Path]::Combine($kitRoot, @($otherLetters)[0]))) {
+    $pathCase = [System.StringComparison]::OrdinalIgnoreCase
+}
+$separator = [System.IO.Path]::DirectorySeparatorChar
+$places = @(
+    @($targetRoot, $kitRoot),
+    @((Resolve-KitLinkedPath $targetRoot).TrimEnd('\', '/'), (Resolve-KitLinkedPath $kitRoot).TrimEnd('\', '/'))
+)
+foreach ($pair in $places) {
+    if ($pair[0].Equals($pair[1], $pathCase) -or $pair[0].StartsWith($pair[1] + $separator, $pathCase)) {
+        Stop-Install "-Target is the kit itself, or a folder inside it. Point it at your own project."
+    }
 }
 try {
-    $projectText = $utf8.GetString([System.IO.File]::ReadAllBytes($projectFile))
+    $projectBytes = [System.IO.File]::ReadAllBytes($projectFile)
+} catch [System.UnauthorizedAccessException], [System.IO.IOException] {
+    # Open in another program, or no permission: the system's own reason, not a guess.
+    $reason = $_.Exception.Message.TrimEnd('.')
+    Stop-Install "project.godot cannot be read: $reason. Close the program that holds it or make it readable, then run again."
+}
+try {
+    $projectText = $utf8.GetString($projectBytes)
 } catch {
     Stop-Install "project.godot is not UTF-8 text. Save it again from the Godot editor, then run again."
 }
@@ -564,7 +722,7 @@ $previousWrote = @{}
 $previousUnfinished = @{}   # what a run that stopped halfway was writing: path -> hash
 $installedVersion = ""
 $manifestFull = Join-Relative $targetRoot $manifestPath
-$hadManifest = [System.IO.File]::Exists($manifestFull)
+$hadManifest = Test-TargetFile $manifestPath
 if ($hadManifest) {
     $restore = "Restore it from git, then run again."
     $recorded = Read-JsonFile $manifestFull "the target's $manifestPath" $restore
@@ -601,15 +759,15 @@ if ($hadManifest) {
 }
 
 $targetConfigFile = Join-Relative $targetRoot "kit.json"
-$hasKitJson = [System.IO.File]::Exists($targetConfigFile)
+$hasKitJson = Test-TargetFile "kit.json"
 $testRootName = "test"
 $targetStrict = [bool]$StrictWarnings
 if ($hasKitJson) {
     $targetConfig = Read-JsonFile $targetConfigFile "the target's kit.json" "Repair it, or delete it to get a new one."
     if ($targetConfig.tests -and $targetConfig.tests.root) {
-        $testRootName = ([string]$targetConfig.tests.root -replace '^res://', '').Trim('/', '\')
-        if (-not $testRootName -or $testRootName -match '(^|[\\/])\.\.([\\/]|$)' -or
-            [System.IO.Path]::IsPathRooted($testRootName)) {
+        # Read as the tools read it: "res://spec/" is spec, "spec\unit" is spec/unit.
+        $testRootName = ConvertTo-KitProjectFolder ([string]$targetConfig.tests.root)
+        if (-not $testRootName) {
             Stop-Install "the target's kit.json tests.root must be a folder inside the project, not '$($targetConfig.tests.root)'."
         }
     }
@@ -622,8 +780,16 @@ if ($hasKitJson) {
             'To start with it off, add:  "gdscript": {"strict": false}')
     }
 } else {
-    foreach ($candidate in $testRootCandidates) {
-        if (Test-HasSuite (Join-Relative $targetRoot $candidate)) { $testRootName = $candidate; break }
+    # In the project's own spelling, which the tools read as written: Tests/ is "Tests".
+    $rootFolders = Get-Ordered @([System.IO.Directory]::EnumerateDirectories($targetRoot) |
+            ForEach-Object { [System.IO.Path]::GetFileName($_) })
+    $anyCase = [System.StringComparison]::OrdinalIgnoreCase
+    :candidates foreach ($candidate in $testRootCandidates) {
+        $spelled = @($rootFolders | Where-Object { $_ -ceq $candidate }) +
+            @($rootFolders | Where-Object { $_ -cne $candidate -and $_.Equals($candidate, $anyCase) })
+        foreach ($name in $spelled) {
+            if (Test-HasSuite (Join-Relative $targetRoot $name)) { $testRootName = $name; break candidates }
+        }
     }
 }
 $starterRelative = "$testRootName/unit/test_kit_smoke.gd"
@@ -640,7 +806,7 @@ if ($patch.Problem) { Stop-Install $patch.Problem }
 
 $gitignoreFile = Join-Relative $targetRoot ".gitignore"
 $gitignoreBytes = [byte[]]::new(0)
-if ([System.IO.File]::Exists($gitignoreFile)) { $gitignoreBytes = [System.IO.File]::ReadAllBytes($gitignoreFile) }
+if (Test-TargetFile ".gitignore") { $gitignoreBytes = [System.IO.File]::ReadAllBytes($gitignoreFile) }
 if ([System.Array]::IndexOf($gitignoreBytes, [byte]0) -ge 0) {
     Stop-Install ".gitignore is not UTF-8 text (it holds NUL bytes, as UTF-16 does), so git does not read it either. Save it as UTF-8, then run again."
 }
@@ -661,7 +827,7 @@ function Add-OwnedFile {
     $hash = Get-ContentHash (Join-Relative $kitRoot $SourceRelative)
     $owned[$Relative] = $hash
     $recorded = $previousFiles[$Relative]
-    if (-not [System.IO.File]::Exists($destination)) {
+    if (-not (Test-TargetFile $Relative)) {
         if ($MergeCopy -and $recorded -eq $hash) { $script:unchanged++; return }
         $writes.Add([PSCustomObject]@{ Source = $SourceRelative; Relative = $Relative; Why = "new" })
         return
@@ -691,7 +857,7 @@ foreach ($tree in $ownedTrees) {
 $fromTemplate = -not $hadManifest -and $script:unchanged -gt 0
 $templateVersion = ""
 $targetVersionFile = Join-Relative $targetRoot "VERSION"
-if ($fromTemplate -and [System.IO.File]::Exists($targetVersionFile)) {
+if ($fromTemplate -and (Test-TargetFile "VERSION")) {
     $templateVersion = [regex]::Match([System.IO.File]::ReadAllText($targetVersionFile), '^\s*(\d+(\.\d+)+\S*)\s*$').Groups[1].Value
 }
 if ($templateVersion -and $templateVersion -ne $kitVersion) {
@@ -706,7 +872,7 @@ $seeded = [ordered]@{}
 $kitAgentsHash = Get-ContentHash (Join-Relative $kitRoot "AGENTS.md")
 $targetAgents = Join-Relative $targetRoot "AGENTS.md"
 $agents = "seed"
-if ([System.IO.File]::Exists($targetAgents)) {
+if (Test-TargetFile "AGENTS.md") {
     $startedFrom = $previousSeeded["AGENTS.md"]
     if ((Get-ContentHash $targetAgents) -eq $kitAgentsHash) { $startedFrom = $kitAgentsHash }
     if ($startedFrom) { $seeded["AGENTS.md"] = $startedFrom }
@@ -725,12 +891,12 @@ if ([System.IO.File]::Exists($targetAgents)) {
 # is ever removed: a path it never installs is the project's, whatever the manifest says.
 $removals = [System.Collections.Generic.List[string]]::new()
 $leftBehind = [System.Collections.Generic.List[string]]::new()
-foreach ($relative in @($previousFiles.Keys | Sort-Object)) {
+foreach ($relative in (Get-Ordered $previousFiles.Keys)) {
     $inOwnedTree = @($ownedTrees | Where-Object { $relative.StartsWith("$_/") }).Count -gt 0
     if ($owned.Contains($relative) -or -not ($inOwnedTree -or $relative -eq $kitAgentsCopy)) { continue }
     if (Test-NotInstalled $relative) { continue }
     $path = Join-Relative $targetRoot $relative
-    if (-not [System.IO.File]::Exists($path)) { continue }
+    if (-not (Test-TargetFile $relative)) { continue }
     if ((Get-ContentHash $path) -eq $previousFiles[$relative]) { $removals.Add($relative) } else { $leftBehind.Add($relative) }
 }
 
@@ -750,7 +916,7 @@ if ($installGdunit) {
 } else {
     $plugin = Join-Relative $gdunitFolder "plugin.cfg"
     $found = ""
-    if ([System.IO.File]::Exists($plugin)) {
+    if (Test-TargetFile "addons/gdUnit4/plugin.cfg") {
         $found = "$(Get-ProjectValue ([System.IO.File]::ReadAllText($plugin)) 'plugin' 'version')".Trim().Trim('"')
     }
     if ($found -eq $kitGdunit) {
@@ -776,7 +942,7 @@ foreach ($tree in $seedTrees) {
         if (@($seedSkipped | Where-Object { $relative.StartsWith($_) }).Count -eq 0) { $seedCandidates += $relative }
     }
 }
-$ownPyproject = [System.IO.File]::Exists((Join-Relative $targetRoot "pyproject.toml"))
+$ownPyproject = Test-TargetFile "pyproject.toml"
 $kitsPyproject = -not $ownPyproject
 # What this run writes beside the kit's files, path -> hash: the manifest's "unfinished"
 # while the run is under way.
@@ -798,7 +964,7 @@ foreach ($relative in $seedCandidates) {
     }
     $path = Join-Relative $targetRoot $relative
     $follows = $true
-    if (-not [System.IO.File]::Exists($path)) {
+    if (-not (Test-TargetFile $relative)) {
         if ($before) {
             # You deleted it: it stays deleted.
             $follows = $false
@@ -834,10 +1000,10 @@ if ($needsStarter) { $unfinished[$starterRelative] = Get-BytesHash ($utf8.GetByt
 # A starter file this kit no longer ships stays, and stays on record while it is there:
 # without a hash once that has been said.
 $seedDropped = [System.Collections.Generic.List[string]]::new()
-foreach ($relative in @($previousSeeded.Keys | Sort-Object)) {
+foreach ($relative in (Get-Ordered $previousSeeded.Keys)) {
     if ($seeded.Contains($relative) -or $seedCandidates -contains $relative) { continue }
     if (-not (Test-InsidePath $targetRoot $relative)) { continue }
-    if (-not [System.IO.File]::Exists((Join-Relative $targetRoot $relative))) { continue }
+    if (-not (Test-TargetFile $relative)) { continue }
     if ($previousSeeded[$relative]) { $seedDropped.Add($relative) }
     $seeded[$relative] = ""
 }
@@ -882,6 +1048,199 @@ $manifest = [ordered]@{
 $manifestText = (($manifest | ConvertTo-Json -Depth 4) -replace "`r`n", "`n") + "`n"
 $manifestChanged = -not $hadManifest -or
     ([System.IO.File]::ReadAllText($manifestFull) -replace "`r`n", "`n") -ne $manifestText
+
+# --- What stands in the way -----------------------------------------------------------
+# Looked for on the way to every path this run writes or deletes, before the first write.
+
+$clearFolders = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$folderNames = [System.Collections.Generic.Dictionary[string, string[]]]::new([System.StringComparer]::Ordinal)
+$otherLetterNames = [ordered]@{}   # a name of the project -> the kit's, where the two are one name
+
+function Get-PathObstacle {
+    # What stands between the project's root and -Relative, or $null: a link, a name the
+    # file system keeps apart from the kit's by letter case only, a file where a folder
+    # has to be (or a folder where a file has to be). -Folder: the path is a folder's.
+    param([string]$Relative, [switch]$Folder)
+    $parts = $Relative.Split('/')
+    $parent = $targetRoot
+    $walked = ""
+    for ($index = 0; $index -lt $parts.Count; $index++) {
+        $name = $parts[$index]
+        $walked = if ($walked) { "$walked/$name" } else { $name }
+        $path = [System.IO.Path]::Combine($parent, $name)
+        $last = $index -eq $parts.Count - 1
+        if (-not $last -and $clearFolders.Contains($walked)) { $parent = $path; continue }
+        $attributes = [System.IO.FileInfo]::new($path).Attributes
+        $missing = [int]$attributes -eq -1
+        $linked = -not $missing -and ($attributes -band [System.IO.FileAttributes]::ReparsePoint)
+        if ($missing) {
+            if (-not $folderNames.ContainsKey($parent)) {
+                $folderNames[$parent] = @([System.IO.Directory]::GetFileSystemEntries($parent) |
+                        ForEach-Object { [System.IO.Path]::GetFileName($_) })
+            }
+            foreach ($sibling in $folderNames[$parent]) {
+                # In the folder's list, and not there when asked for: a link to nowhere.
+                if ($sibling -ceq $name) { $linked = $true; break }
+                if ($sibling.Equals($name, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $theirs = $walked.Substring(0, $walked.Length - $name.Length) + $sibling
+                    return [PSCustomObject]@{ Kind = "case"; Where = $theirs; Detail = $walked }
+                }
+            }
+            if (-not $linked) { return $null }   # nothing there, and so nothing below it
+        }
+        if ($linked) {
+            # Asked of PowerShell (.NET names a link's target from PowerShell 7.2 on). A
+            # reparse point that is no link, such as a cloud placeholder, is a plain file.
+            $link = Get-Item -LiteralPath $path -Force
+            if ($link.LinkType -in @("SymbolicLink", "Junction")) {
+                return [PSCustomObject]@{ Kind = "link"; Where = $walked; Detail = "$(@($link.Target)[0])" }
+            }
+        }
+        if ($missing) { return $null }
+        # There, and under other letters in its folder's list: a file system that takes one
+        # letter case for another (Windows; macOS as it is installed). The kit's files go
+        # into it; the run says so.
+        if (-not $folderNames.ContainsKey($parent)) {
+            $folderNames[$parent] = @([System.IO.Directory]::GetFileSystemEntries($parent) |
+                    ForEach-Object { [System.IO.Path]::GetFileName($_) })
+        }
+        if ($folderNames[$parent] -cnotcontains $name) {
+            $anyCase = [System.StringComparison]::OrdinalIgnoreCase
+            $sibling = @($folderNames[$parent] | Where-Object { $_.Equals($name, $anyCase) })
+            if ($sibling.Count -gt 0) {
+                $theirs = $walked.Substring(0, $walked.Length - $name.Length) + $sibling[0]
+                $otherLetterNames[$theirs] = $walked
+            }
+        }
+        $isFolder = [bool]($attributes -band [System.IO.FileAttributes]::Directory)
+        if ($last) {
+            if ($isFolder -ne [bool]$Folder) {
+                $found = if ($isFolder) { "folder" } else { "file" }
+                return [PSCustomObject]@{ Kind = $found; Where = $walked; Detail = $Relative }
+            }
+            return $null
+        }
+        if (-not $isFolder) { return [PSCustomObject]@{ Kind = "file"; Where = $walked; Detail = $Relative } }
+        [void]$clearFolders.Add($walked)
+        $parent = $path
+    }
+    return $null
+}
+
+function Join-Named {
+    # "a, b and 3 more": the first five of -Names.
+    param([string[]]$Names)
+    $shown = @($Names | Select-Object -First 5) -join ", "
+    if ($Names.Count -gt 5) { $shown += " and $($Names.Count - 5) more" }
+    return $shown
+}
+
+# What a run that was cut short left beside the files it was writing. Looked for in the
+# folders the kit writes into, not in the whole project, and behind no link.
+$kitFolders = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+[void]$kitFolders.Add("")   # the project's own folder: project.godot, .gitignore, kit.json
+$onRecord = @($owned.Keys) + @($previousFiles.Keys) + $seedCandidates + @($previousSeeded.Keys) +
+    @($previousUnfinished.Keys) + @($manifestPath, $starterRelative, [string]$previousWrote["starter_test"])
+foreach ($relative in $onRecord) {
+    if (-not (Test-InsidePath $targetRoot $relative)) { continue }
+    [void]$kitFolders.Add($relative.Substring(0, [Math]::Max(0, $relative.LastIndexOf('/'))))
+}
+$leftovers = [System.Collections.Generic.List[string]]::new()
+foreach ($folder in (Get-Ordered $kitFolders)) {
+    $full = $targetRoot
+    if ($folder) {
+        $full = Join-Relative $targetRoot $folder
+        if (Get-PathObstacle $folder -Folder) { continue }
+    }
+    if (-not [System.IO.Directory]::Exists($full)) { continue }
+    foreach ($file in [System.IO.Directory]::EnumerateFiles($full, ".*$newSuffix")) {
+        $leftovers.Add(("$folder/" + [System.IO.Path]::GetFileName($file)).TrimStart('/'))
+    }
+}
+$leftovers.Sort([System.StringComparer]::Ordinal)
+
+$seedWrites = @($seedNew) + @($seedUpdated)
+$writtenFiles = [System.Collections.Generic.List[string]]::new()
+if ($manifestChanged) { $writtenFiles.Add($manifestPath) }
+foreach ($write in $writes) { $writtenFiles.Add($write.Relative) }
+$writtenFiles.AddRange([string[]]@($removals))
+$writtenFiles.AddRange([string[]]$seedWrites)
+if (-not $hasKitJson) { $writtenFiles.Add("kit.json") }
+if ($needsStarter) { $writtenFiles.AddRange([string[]]@($starterRelative, "$starterRelative.uid")) }
+if ($patch.Changes.Count -gt 0) { $writtenFiles.Add("project.godot") }
+if ($ignorePatch.Missing.Count -gt 0) { $writtenFiles.Add(".gitignore") }
+$writtenFolders = @()
+if ($installGdunit) { $writtenFolders += "addons/gdUnit4" }
+if ($installGdunit -or $stalePartial) { $writtenFolders += $gdunitPartial }
+
+$obstacles = [ordered]@{}   # where it is -> what it is: one entry however many files lie behind it
+foreach ($relative in $writtenFiles) {
+    $obstacle = Get-PathObstacle $relative
+    if ($obstacle -and -not $obstacles.Contains($obstacle.Where)) { $obstacles[$obstacle.Where] = $obstacle }
+}
+foreach ($relative in $writtenFolders) {
+    $obstacle = Get-PathObstacle $relative -Folder
+    if ($obstacle -and -not $obstacles.Contains($obstacle.Where)) { $obstacles[$obstacle.Where] = $obstacle }
+}
+$links = @($obstacles.Values | Where-Object { $_.Kind -eq "link" })
+if ($links.Count -gt 0) {
+    $named = Join-Named @($links | ForEach-Object { "'$($_.Where)' (to '$($_.Detail)')" })
+    Stop-Install ("the kit writes no file through a link, and the project has $($links.Count) on the way: $named. " +
+        "Put a real folder or file there, then run again.")
+}
+$spellings = @($obstacles.Values | Where-Object { $_.Kind -eq "case" })
+if ($spellings.Count -gt 0) {
+    $named = Join-Named @($spellings | ForEach-Object { "'$($_.Where)' (the kit writes '$($_.Detail)')" })
+    Stop-Install ("$($spellings.Count) name(s) in the project differ from the kit's in letter case only: $named. " +
+        "Windows and macOS take the two for one name. Rename yours, then run again.")
+}
+$misplaced = @($obstacles.Values | Where-Object { $_.Kind -in @("file", "folder") })
+if ($misplaced.Count -gt 0) {
+    $first = $misplaced[0]
+    $needs = if ($first.Kind -eq "file") { "needs a folder" } else { "writes a file" }
+    $more = if ($misplaced.Count -gt 1) { " ($($misplaced.Count - 1) more like it)" } else { "" }
+    Stop-Install ("'$($first.Where)' in the project is a $($first.Kind) where the kit $needs (for $($first.Detail))$more. " +
+        "Rename or move it, then run again.")
+}
+if ($otherLetterNames.Count -gt 0) {
+    $named = Join-Named @($otherLetterNames.Keys | ForEach-Object { "'$_' (the kit writes '$($otherLetterNames[$_])')" })
+    $first = @($otherLetterNames.Keys)[0]
+    $notes.Add("$($otherLetterNames.Count) name(s) in the project differ from the kit's in letter case only: $named. " +
+        "This file system takes the two for one name, so the kit's files go into yours. Rename yours, in two steps " +
+        "(git mv $first $first-x, then git mv $first-x $($otherLetterNames[$first])): until then the agents-md gate " +
+        "fails on the paths AGENTS.md names, Godot warns of a case mismatch, and Linux refuses the project.")
+}
+# GitHub and pre-commit read their files at the repository's root alone.
+$rootOnly = @(".github/workflows/ci.yml", ".github/copilot-instructions.md", ".pre-commit-config.yaml")
+$rootOnlyNew = @($rootOnly | Where-Object { $seedNew.Contains($_) })
+if ($rootOnlyNew.Count -gt 0 -and -not (Test-Path -LiteralPath (Join-Relative $targetRoot ".git"))) {
+    $above = [System.IO.Path]::GetDirectoryName($targetRoot)
+    while ($above -and -not (Test-Path -LiteralPath ([System.IO.Path]::Combine($above, ".git")))) {
+        $above = [System.IO.Path]::GetDirectoryName($above)
+    }
+    if ($above) {
+        $prefix = $targetRoot.Substring($above.TrimEnd('\', '/').Length + 1).Replace('\', '/')
+        $notes.Add("the project is the folder '$prefix' of a git repository. GitHub and pre-commit read " +
+            "$($rootOnlyNew -join ', ') at the repository's root only: move them there and put '$prefix/' in " +
+            "front of the paths they name; the workflow also needs 'working-directory: $prefix' under 'defaults: run:'.")
+    }
+}
+# A file this run replaces, adds to or deletes is opened for writing, and closed unchanged.
+$locked =[System.Collections.Generic.List[string]]::new()
+foreach ($relative in $writtenFiles) {
+    if (-not (Test-TargetFile $relative)) { continue }
+    try {
+        [System.IO.File]::Open((Join-Relative $targetRoot $relative), [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Write, [System.IO.FileShare]"ReadWrite, Delete").Dispose()
+    } catch [System.UnauthorizedAccessException], [System.IO.IOException] {
+        $locked.Add($relative)
+    }
+}
+if ($locked.Count -gt 0) {
+    $named = Join-Named @($locked | ForEach-Object { "'$_'" })
+    Stop-Install ("$($locked.Count) file(s) in the project cannot be written (read-only, no write permission, " +
+        "or open in another program): $named. Make them writable, then run again.")
+}
 
 # --- Report ---------------------------------------------------------------------------
 
@@ -940,7 +1299,7 @@ foreach ($relative in $seedDropped) {
     Write-Detail "!" @("$relative   (no longer part of the kit; yours to keep or delete)")
 }
 # The row points at the kit's copy: said while that file is there.
-$agentsCopyThere = [System.IO.File]::Exists((Join-Relative $targetRoot $kitAgentsCopy)) -or
+$agentsCopyThere = (Test-TargetFile $kitAgentsCopy) -or
     @($writes | Where-Object { $_.Relative -eq $kitAgentsCopy }).Count -gt 0
 if ($agentsCopyThere) {
     switch ($agents) {
@@ -952,16 +1311,19 @@ if ($needsStarter) { Write-Row "starter test" "$starterRelative   (no gdUnit4 su
 Write-Row "project.godot" $(if ($patch.Changes.Count) { $patch.Changes -join "; " } else { "no change" })
 Write-Row ".gitignore" $(if ($ignorePatch.Missing.Count) { "+ " + ($ignorePatch.Missing -join " ") } else { "no change" })
 Write-Row "manifest" $(if ($manifestChanged) { "$manifestPath   (commit it)" } else { "no change" })
+if ($leftovers.Count -gt 0) {
+    Write-Row "left over" "$($leftovers.Count) temporary file(s) of a run that was cut short"
+    Write-Detail "-" $leftovers
+}
 
 foreach ($note in $notes) {
     Write-Host ""
     Write-Host "note: $note" -ForegroundColor Yellow
 }
 
-$seedWrites = @($seedNew) + @($seedUpdated)
 $pending = $writes.Count + $removals.Count + $gdunitFiles.Count + $seedWrites.Count + $patch.Changes.Count +
     $ignorePatch.Missing.Count + [int]$manifestChanged + [int](-not $hasKitJson) + [int]$needsStarter +
-    [int]$stalePartial
+    [int]$stalePartial + $leftovers.Count
 Write-Host ""
 if ($DryRun) {
     Write-Host "Dry run: nothing was written." -ForegroundColor Yellow
@@ -973,8 +1335,9 @@ if ($pending -eq 0) {
 }
 
 # --- Apply ----------------------------------------------------------------------------
-# A run that stops halfway is finished by running it again: kit files are compared by
-# hash and gdUnit4 arrives whole or not at all. The manifest is written twice. First with
+# A run that stops halfway is finished by running it again: every file arrives whole or
+# not at all (Writing, above), kit files are compared by hash, and gdUnit4 arrives whole
+# or not at all as a folder. The manifest is written twice. First with
 # what this run writes beside the kit's files ("wrote", and "unfinished" for the starter
 # files on their way), so that record is never lost; "files" and "seeded" stay as they
 # were, so the next run still knows an update from a change of yours. Last, complete.
@@ -991,32 +1354,41 @@ if ($manifestChanged) {
     Write-TextFile $manifestFull ((($started | ConvertTo-Json -Depth 4) -replace "`r`n", "`n") + "`n")
 }
 $applying = $true
-foreach ($write in $writes) { Copy-KitFile $write.Source $write.Relative }
-foreach ($relative in $removals) { [System.IO.File]::Delete((Join-Relative $targetRoot $relative)) }
-if ($stalePartial) { [System.IO.Directory]::Delete((Join-Relative $targetRoot $gdunitPartial), $true) }
-if ($installGdunit) {
-    foreach ($relative in $gdunitFiles) {
-        Copy-KitFile $relative ($gdunitPartial + $relative.Substring("addons/gdUnit4".Length))
+$finished = $false
+$failed = $false
+try {
+    foreach ($relative in $leftovers) { Remove-NewFile (Join-Relative $targetRoot $relative) }
+    foreach ($write in $writes) { Copy-KitFile $write.Source $write.Relative }
+    foreach ($relative in $removals) { [System.IO.File]::Delete((Join-Relative $targetRoot $relative)) }
+    if ($stalePartial) { [System.IO.Directory]::Delete((Join-Relative $targetRoot $gdunitPartial), $true) }
+    if ($installGdunit) {
+        foreach ($relative in $gdunitFiles) {
+            Copy-KitFile $relative ($gdunitPartial + $relative.Substring("addons/gdUnit4".Length)) -Staged
+        }
+        [System.IO.Directory]::Move((Join-Relative $targetRoot $gdunitPartial), $gdunitFolder)
     }
-    [System.IO.Directory]::Move((Join-Relative $targetRoot $gdunitPartial), $gdunitFolder)
-}
-foreach ($relative in $seedWrites) {
-    if ($relative -eq ".pre-commit-config.yaml") {
-        Write-TextFile (Join-Relative $targetRoot $relative) $preCommitText
-    } else {
-        Copy-KitFile $relative
+    foreach ($relative in $seedWrites) {
+        if ($relative -eq ".pre-commit-config.yaml") {
+            Write-TextFile (Join-Relative $targetRoot $relative) $preCommitText
+        } else {
+            Copy-KitFile $relative
+        }
     }
-}
-if (-not $hasKitJson) {
-    $pins = @(
-        $kitGodot, [string]$kitConfig.godot.windows_x86_64_sha512, $kitGdunit,
-        [string]$kitConfig.gdunit4.source_archive_sha256, $testRootName
-    ) | ForEach-Object { ConvertTo-Json $_ }
-    $kitJson = @"
+    if (-not $hasKitJson) {
+        $pins = @(
+            $kitGodot, [string]$kitConfig.godot.windows_x86_64_sha512, $kitGdunit,
+            [string]$kitConfig.gdunit4.source_archive_sha256, $testRootName
+        ) | ForEach-Object { ConvertTo-Json $_ }
+        # One checksum for each of Godot's downloads, as the kit pins them.
+        $godotPins = foreach ($build in @("linux_x86_64", "linux_arm64", "macos_universal")) {
+            "    `"${build}_sha512`": $(ConvertTo-Json ([string]$kitConfig.godot."${build}_sha512")),"
+        }
+        $kitJson = @"
 {
   "godot": {
     "version": $($pins[0]),
     "windows_x86_64_sha512": $($pins[1]),
+$($godotPins -join "`n")
     "search_roots": []
   },
   "gdunit4": {
@@ -1035,19 +1407,44 @@ if (-not $hasKitJson) {
   }
 }
 "@
-    Write-TextFile $targetConfigFile (($kitJson -replace "`r`n", "`n") + "`n")
+        Write-TextFile $targetConfigFile (($kitJson -replace "`r`n", "`n") + "`n")
+    }
+    if ($needsStarter) {
+        Write-TextFile (Join-Relative $targetRoot $starterRelative) $starterText
+        Write-TextFile (Join-Relative $targetRoot "$starterRelative.uid") "$starterUid`n"
+    }
+    if ($patch.Changes.Count -gt 0) { Write-TextFile $projectFile $patch.Text }
+    if ($ignorePatch.Missing.Count -gt 0) {
+        # Its own bytes as they are, then the kit's lines.
+        Write-TargetFile $gitignoreFile ([byte[]]($gitignoreBytes + $utf8.GetBytes($ignorePatch.Append)))
+    }
+    if ($manifestChanged) { Write-TextFile $manifestFull $manifestText }
+    $finished = $true
+} catch {
+    $failed = $true
+    throw   # to the trap above, which says why and that the run stopped halfway
+} finally {
+    # Neither finished nor failed: stopped from outside (Ctrl+C), which no trap sees.
+    if (-not $finished -and -not $failed) {
+        Write-Host "install: interrupted: stopped halfway. Run the same command again." -ForegroundColor Red
+        # `exit` cannot set the exit code of a script with [CmdletBinding()] that is being
+        # stopped; the host can. Only where this process was started to run this script
+        # (pwsh -File): in a session somebody types into, it would end the session.
+        foreach ($argument in [System.Environment]::GetCommandLineArgs()) {
+            try {
+                if ([System.IO.Path]::GetFullPath($argument) -eq $PSCommandPath) { $host.SetShouldExit(1) }
+            } catch {
+                $null = $_   # no path at all
+            }
+        }
+        exit 1
+    }
 }
-if ($needsStarter) {
-    Write-TextFile (Join-Relative $targetRoot $starterRelative) $starterText
-    Write-TextFile (Join-Relative $targetRoot "$starterRelative.uid") "$starterUid`n"
-}
-if ($patch.Changes.Count -gt 0) { Write-TextFile $projectFile $patch.Text }
-if ($ignorePatch.Missing.Count -gt 0) { [System.IO.File]::AppendAllText($gitignoreFile, $ignorePatch.Append, $utf8) }
-if ($manifestChanged) { Write-TextFile $manifestFull $manifestText }
 
-Write-Host "Installed. Next, in $targetRoot`:" -ForegroundColor Green
-Write-Host "  pwsh ./tools/setup.ps1 -InstallGodot   # Python tools, Godot $kitGodot, first import, doctor"
-Write-Host "  pwsh ./tools/check.ps1                 # every gate"
+# No comment after a command: a zsh somebody types into hands it over as arguments.
+Write-Host "Installed. Next, in $targetRoot (Python tools, Godot $kitGodot, first import, doctor; then every gate):" -ForegroundColor Green
+Write-Host "  pwsh ./tools/setup.ps1 -InstallGodot"
+Write-Host "  pwsh ./tools/check.ps1"
 if (-not $targetStrict -and -not $StrictWarnings) {
     Write-Host "The strict type check is off (kit.json gdscript.strict). When the code is typed:"
     Write-Host "  pwsh `"$(Join-Path $kitRoot 'install.ps1')`" -Target `"$targetRoot`" -StrictWarnings"

@@ -6,7 +6,9 @@ command, one file per reply, so several clients can talk to one game at once. St
 then talk to it:
 
     $env:GODOT_AGENT_SESSION = "agent-1"     # the same value for the game and for this CLI
-    pwsh ./tools/godot.ps1                    # in another terminal, or as a background job
+                                              # (bash: export GODOT_AGENT_SESSION=agent-1)
+    pwsh ./tools/godot.ps1                    # in another terminal, or as a background job;
+                                              # Linux with no display: xvfb-run -a pwsh ...
     uv run python tools/devtools.py wait      # a windowed Godot can detach from its shell:
                                               # poll for it, do not sleep
     uv run python tools/devtools.py ping
@@ -36,6 +38,13 @@ set-state and run-method are refused unless the project setting devtools/allow_m
 true. Screenshots land in <user data>/screenshots/, or with a session in
 <user data>/screenshots/<session>/; every capture prints its path and `ping` the folder.
 
+<user data> is Godot's folder for the project (`ping` prints it):
+    Windows  %APPDATA%\\Godot\\app_userdata\\<project name>
+    Linux    $XDG_DATA_HOME/godot/app_userdata/<project name>; without an absolute
+             XDG_DATA_HOME, $HOME/.local/share/godot/app_userdata/<project name>
+    macOS    $HOME/Library/Application Support/Godot/app_userdata/<project name>
+The game and this client find it from those variables: give both the same values.
+
 Files, in <user data>/devtools/ (devtools_<session>/ with a session):
     commands/<id>.json   written here, removed by the game once read
     results/<id>.json    the reply to command <id>, removed here once read
@@ -44,8 +53,10 @@ Files, in <user data>/devtools/ (devtools_<session>/ with a session):
 Exit codes:
     0  the command succeeded
     1  the game answered and the command failed (assert failed, node missing, refused)
-    2  bad usage (arguments, an unreadable file, no project.godot)
-    3  no answer in time (game not running, another session, or not a debug build)
+    2  bad usage (arguments, an unreadable file, no project.godot, no user data folder, a
+       mailbox this user cannot write)
+    3  no answer in time (game not running, another session, or not a debug build); at once
+       when no game has made the session's mailbox. Only the game makes that folder.
 
 Results go to stdout, diagnostics to stderr.
 """
@@ -57,10 +68,9 @@ import json
 import math
 import os
 import sys
-import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import suppress
 from pathlib import Path
 
@@ -73,6 +83,7 @@ RESULTS_FOLDER = "results"
 LOG_NAME = "log.jsonl"
 LOG_BLOCK_BYTES = 64 * 1024
 UNNAMED_PROJECT = "[unnamed project]"
+GODOT_ESCAPES = {"b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r"}
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -81,6 +92,7 @@ EXIT_NO_RESPONSE = 3
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 POLL_INTERVAL_SECONDS = 0.05
+WRITE_ATTEMPTS = 5
 WAIT_ATTEMPT_SECONDS = 2.0
 SEQUENCE_POLL_INTERVAL_SECONDS = 0.1
 SEQUENCE_STATUS_RUNNING = "running"
@@ -95,6 +107,10 @@ class UsageError(Exception):
 
 class NoResponseError(TimeoutError):
     """The game did not answer in time (exit 3)."""
+
+
+class NoMailboxError(NoResponseError):
+    """No game has made the session's mailbox, so there is nobody to ask (exit 3)."""
 
 
 def sanitize_session_name(raw_session: str) -> str:
@@ -129,95 +145,192 @@ def new_command_id() -> str:
     return f"{time.time_ns():016x}{uuid.uuid4().hex[:16]}"
 
 
-def read_application_settings(project_file: Path) -> dict[str, str]:
-    """The [application] section of project.godot, string values unquoted.
+def godot_string(text: str, start: int) -> tuple[str, int]:
+    """The string whose opening quote is text[start], and the index after its closing quote.
 
-    A quoted value may run over several lines (a description): the lines inside it are
-    not headers or entries, whatever they look like. Of such a value only the first line
-    is kept.
+    Unescaped as Godot reads a project file (VariantParser): \\b \\t \\n \\f \\r, \\uXXXX,
+    \\UXXXXXX, and any other character after a backslash stands for itself. A tab or a line
+    break may stand in the string as it is.
     """
+    parts: list[str] = []
+    position = start + 1
+    while position < len(text) and text[position] != '"':
+        character = text[position]
+        position += 1
+        if character == "\\" and position < len(text):
+            character = text[position]
+            position += 1
+            digits = text[position : position + {"u": 4, "U": 6}.get(character, 0)]
+            if digits and all(digit in "0123456789abcdefABCDEF" for digit in digits):
+                character = chr(int(digits, 16))
+                position += len(digits)
+            else:
+                character = GODOT_ESCAPES.get(character, character)
+        parts.append(character)
+    # Two \\u escapes may be the halves of one character.
+    whole = "".join(parts).encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+    return whole, position + 1
+
+
+def read_application_settings(project_file: Path) -> dict[str, str]:
+    """The [application] section of project.godot: a value in quotes as Godot reads it
+    (godot_string), any other value as it is written.
+
+    A string may run over several lines (a description, a name with a line break): what is
+    inside it is no header and no entry, whatever it looks like.
+    """
+    text = project_file.read_text(encoding="utf-8")
     settings: dict[str, str] = {}
     section = ""
-    inside_string = False
-    for line in project_file.read_text(encoding="utf-8").splitlines():
-        continues = inside_string
-        if line.replace('\\"', "").count('"') % 2:
-            inside_string = not inside_string
-        if continues:
-            continue
-        stripped = line.strip()
+    position = 0
+    while position < len(text):
+        # One entry: up to the first line end outside a string and outside a comment.
+        start = end = position
+        strings: dict[int, str] = {}
+        while position < len(text) and text[position] != "\n":
+            if text[position] == '"':
+                strings[position - start], position = godot_string(text, position)
+                end = min(position, len(text))
+            elif text[position] == ";":
+                line_end = text.find("\n", position)
+                position = len(text) if line_end < 0 else line_end
+            else:
+                position += 1
+                end = position
+        position += 1
+        entry = text[start:end]
+        stripped = entry.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             section = stripped[1:-1]
-        elif section == "application" and "=" in stripped and not stripped.startswith(";"):
-            key, raw = stripped.split("=", 1)
-            value = raw.strip()
-            if value.startswith('"'):
-                try:
-                    value = str(json.loads(value))
-                except json.JSONDecodeError:
-                    value = value.strip('"')
-            settings[key.strip()] = value
+        elif section == "application" and "=" in entry:
+            key, raw = entry.split("=", 1)
+            quote = len(entry) - len(raw.lstrip())
+            settings[key.strip()] = strings.get(quote, raw.strip())
     return settings
 
 
+def host_platform() -> str:
+    """This system: "windows", "macos", or "linux" for every other one. This file imports
+    nothing of the kit, so the rule of tools/kit_config.py is repeated here."""
+    return {"win32": "windows", "darwin": "macos"}.get(sys.platform, "linux")
+
+
+def strip_edges(text: str) -> str:
+    """Godot's String.strip_edges: spaces and control characters off both ends, and no
+    other white space (a no-break space stays)."""
+    start, end = 0, len(text)
+    while start < end and ord(text[start]) <= 32:
+        start += 1
+    while end > start and ord(text[end - 1]) <= 32:
+        end -= 1
+    return text[start:end]
+
+
 def safe_dir_name(name: str) -> str:
-    """Godot's OS.get_safe_dir_name: characters a folder name cannot hold become "-"."""
-    safe = name.strip()
+    """Godot's OS.get_safe_dir_name for a project name, the same on every system:
+    characters a folder name cannot hold become "-", the names "." and ".." become words,
+    and dots at the end are dropped."""
+    safe = strip_edges(name)
+    safe = {".": "dot", "..": "twodots"}.get(safe, safe)
     for invalid in ':*?"<>|/\\':
         safe = safe.replace(invalid, "-")
-    return safe
+    return safe.rstrip(".")
 
 
 def safe_dir_path(name: str) -> str:
     """Godot's OS.get_safe_dir_name for a name that may hold folders (custom_user_dir_name):
     slashes stay, and ".." becomes "-" like the other characters, so the folder never
     climbs out of the data folder."""
-    safe = name.replace("\\", "/").replace("//", "/").strip()
+    safe = strip_edges(name.replace("\\", "/").replace("//", "/"))
     for invalid in (*':*?"<>|', ".."):
         safe = safe.replace(invalid, "-")
-    return safe.rstrip(".").strip("/")
+    return safe.rstrip(".")
 
 
-def get_user_data_path(project_path: Path) -> Path:
-    """The folder Godot uses as user:// for the project at `project_path`."""
+def godot_data_root(platform: str, env: Mapping[str, str]) -> Path:
+    """The folder Godot 4.7 keeps user data under, for a game started on `platform`
+    ("windows", "linux", "macos") with the environment `env`:
+
+      windows  %APPDATA%
+      linux    $XDG_DATA_HOME when it is an absolute path, else $HOME/.local/share
+      macos    $HOME/Library/Application Support   (no XDG variable is read there)
+
+    Raises UsageError when `env` names no such folder.
+    """
+    if platform == "windows":
+        if env.get("APPDATA"):
+            return Path(env["APPDATA"])
+        missing = "APPDATA is not set"
+    elif platform == "macos":
+        if env.get("HOME"):
+            return Path(env["HOME"]) / "Library" / "Application Support"
+        missing = "HOME is not set"
+    else:
+        if env.get("XDG_DATA_HOME", "").startswith("/"):
+            return Path(env["XDG_DATA_HOME"])
+        if env.get("HOME"):
+            return Path(env["HOME"]) / ".local" / "share"
+        # What Godot falls back on when a process has no HOME at all.
+        if "HOME" not in env and env.get("XDG_CONFIG_HOME", "").startswith("/"):
+            return Path(env["XDG_CONFIG_HOME"])
+        missing = "XDG_DATA_HOME is not an absolute path and HOME is not set"
+    raise UsageError(
+        f"{missing}, so the game's user data folder cannot be found. "
+        "Run this in the environment the game was started in."
+    )
+
+
+def user_data_folder(settings: Mapping[str, str], platform: str, env: Mapping[str, str]) -> Path:
+    """Godot's OS.get_user_data_dir for a project with the [application] `settings`, run on
+    `platform` with the environment `env` (godot_data_root lists what is read)."""
+    root = godot_data_root(platform, env)
+    shared = root / ("godot" if platform == "linux" else "Godot") / "app_userdata"
+    name = safe_dir_name(settings.get("config/name", ""))
+    if not name:
+        # Godot gives a project without a usable name this folder, custom folder or not.
+        return shared / UNNAMED_PROJECT
+    if settings.get("config/use_custom_user_dir") == "true":
+        custom = safe_dir_path(settings.get("config/custom_user_dir_name", "")) or name
+        return root.joinpath(*(part for part in custom.split("/") if part))
+    return shared / name
+
+
+def get_user_data_path(
+    project_path: Path, platform: str | None = None, env: Mapping[str, str] | None = None
+) -> Path:
+    """The folder Godot uses as user:// for the project at `project_path`: on this system
+    and in this process's environment, unless `platform` and `env` say otherwise."""
     project_file = project_path / "project.godot"
     if not project_file.is_file():
         raise UsageError(f"no project.godot in {project_path} (use --project)")
-    settings = read_application_settings(project_file)
-    name = safe_dir_name(settings.get("config/name", "")) or UNNAMED_PROJECT
-
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA")
-        if not appdata:
-            raise RuntimeError("APPDATA is not set; cannot locate Godot user data")
-        data_root, godot_dir = Path(appdata), "Godot"
-    elif sys.platform == "darwin":
-        data_root, godot_dir = Path.home() / "Library" / "Application Support", "Godot"
-    else:
-        xdg_data_home = os.environ.get("XDG_DATA_HOME")
-        data_root = Path(xdg_data_home) if xdg_data_home else Path.home() / ".local" / "share"
-        godot_dir = "godot"
-
-    if settings.get("config/use_custom_user_dir") == "true":
-        custom = safe_dir_path(settings.get("config/custom_user_dir_name", ""))
-        return data_root / (custom or name)
-    return data_root / godot_dir / "app_userdata" / name
+    return user_data_folder(
+        read_application_settings(project_file),
+        host_platform() if platform is None else platform,
+        os.environ if env is None else env,
+    )
 
 
 def atomic_write_json(path: Path, payload: dict) -> None:
     """Publish JSON with a same-folder rename, so the game never reads half a command."""
-    temporary_path: Path | None = None
+    for attempt in range(WRITE_ATTEMPTS):
+        try:
+            _write_beside_and_rename(path, payload)
+            return
+        except FileNotFoundError:
+            # A game that is starting empties its command folder, and can take the
+            # temporary file with it before the rename. A folder that is gone is not that.
+            if attempt == WRITE_ATTEMPTS - 1 or not path.parent.is_dir():
+                raise
+
+
+def _write_beside_and_rename(path: Path, payload: dict) -> None:
+    # A name of its own, known before the write: a write that fails (a full disk) leaves
+    # no file. Not tempfile: in a folder that takes no new file it tries name after name
+    # on Windows, for ever.
+    temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary:
+        with temporary_path.open("x", encoding="utf-8") as temporary:
             json.dump(payload, temporary)
-            temporary_path = Path(temporary.name)
         for attempt in range(20):
             try:
                 os.replace(temporary_path, path)
@@ -228,9 +341,8 @@ def atomic_write_json(path: Path, payload: dict) -> None:
                     raise
                 time.sleep(0.01)
     finally:
-        if temporary_path is not None:
-            with suppress(FileNotFoundError):
-                temporary_path.unlink()
+        with suppress(FileNotFoundError):
+            temporary_path.unlink()
 
 
 def take_result(result_path: Path) -> dict | None:
@@ -255,18 +367,32 @@ def send_command(
 
     The reply is {"action", "id", "success", "message", "data"}, plus "errors" when the
     engine logged any while the command ran. Raises NoResponseError when none arrives within
-    `timeout` seconds.
+    `timeout` seconds; NoMailboxError, at once, when no game has made the session's mailbox;
+    UsageError when the mailbox cannot be written.
 
     The command and its reply are files of their own, named by a fresh id, so clients that
     send at the same time never read each other's replies.
     """
     paths = get_mailbox_paths(get_user_data_path(project_path), session)
-    paths["commands"].mkdir(parents=True, exist_ok=True)
-    paths["results"].mkdir(parents=True, exist_ok=True)
+    if not paths["root"].is_dir():
+        # The game makes its mailbox when it starts. One made here would stay behind for
+        # every session nobody uses, and in the wrong place when the environment is wrong.
+        raise NoMailboxError(
+            f"no game has run with {SESSION_ENV}={_describe_session(session)} here: its "
+            f"mailbox would be {paths['root']}, and that folder does not exist. Is the game "
+            "a debug build with the DevTools autoload, started in this environment?"
+        )
     command_id = new_command_id()
     command_path = paths["commands"] / f"{command_id}.json"
     result_path = paths["results"] / f"{command_id}.json"
-    atomic_write_json(command_path, {"action": action, "args": args or {}, "id": command_id})
+    try:
+        paths["commands"].mkdir(exist_ok=True)
+        paths["results"].mkdir(exist_ok=True)
+        atomic_write_json(command_path, {"action": action, "args": args or {}, "id": command_id})
+    except OSError as error:
+        raise UsageError(
+            f"cannot write the mailbox {paths['root']}: {error.strerror or error}"
+        ) from error
 
     deadline = time.monotonic() + timeout
     while True:
@@ -281,7 +407,8 @@ def send_command(
         command_path.unlink()  # do not let a game that starts later run a stale command
     raise NoResponseError(
         f"no reply to '{action}' after {timeout:g}s. Is the game running as a debug build "
-        f"with the DevTools autoload, and with {SESSION_ENV}={_describe_session(session)}?"
+        f"with the DevTools autoload, and with {SESSION_ENV}={_describe_session(session)}? "
+        f"Its mailbox would be {paths['root']}"
     )
 
 
@@ -352,30 +479,39 @@ def cmd_ping(args: argparse.Namespace, project_path: Path) -> int:
     return finish(result, args, show)
 
 
+def wait_for_game(project_path: Path, timeout: float) -> dict:
+    """Ping until the game answers, and return its reply. Raises NoResponseError when it
+    has not within `timeout` seconds: a game that is still starting and one that died while
+    starting look the same from here."""
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            mailbox = get_mailbox_paths(get_user_data_path(project_path))["root"]
+            raise NoResponseError(
+                f"the game did not answer within {timeout:g}s "
+                f"({SESSION_ENV}={_describe_session(None)}, mailbox {mailbox}). "
+                "If it was started, its output says why"
+            )
+        try:
+            return send_command(project_path, "ping", timeout=min(WAIT_ATTEMPT_SECONDS, remaining))
+        except NoMailboxError:
+            time.sleep(min(POLL_INTERVAL_SECONDS, remaining))  # the game makes it at start
+        except NoResponseError:
+            continue
+
+
 def cmd_wait(args: argparse.Namespace, project_path: Path) -> int:
     """Poll until the game answers a ping."""
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         raise UsageError("--timeout must be a positive number")
-    deadline = time.monotonic() + args.timeout
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise NoResponseError(
-                f"the game did not answer within {args.timeout:g}s "
-                f"({SESSION_ENV}={_describe_session(None)})"
-            )
-        try:
-            result = send_command(
-                project_path, "ping", timeout=min(WAIT_ATTEMPT_SECONDS, remaining)
-            )
-        except NoResponseError:
-            continue
+    result = wait_for_game(project_path, args.timeout)
 
-        def show(reply: dict) -> None:
-            print(f"DevTools is ready: {describe_game(reply['data'])}")
-            print_error_count(reply["data"])
+    def show(reply: dict) -> None:
+        print(f"DevTools is ready: {describe_game(reply['data'])}")
+        print_error_count(reply["data"])
 
-        return finish(result, args, show)
+    return finish(result, args, show)
 
 
 def cmd_screenshot(args: argparse.Namespace, project_path: Path) -> int:
@@ -623,7 +759,10 @@ def cmd_logs(args: argparse.Namespace, project_path: Path) -> int:
             print(line)
             continue
         stamp = time.strftime("%H:%M:%S", time.localtime(entry.get("timestamp", 0)))
-        print(f"[{stamp}] [{entry.get('category')}] {entry.get('message')}")
+        # A command the game dropped: the row's data says which file and why.
+        data = entry.get("data")
+        reason = f": {data['error']}" if isinstance(data, dict) and data.get("error") else ""
+        print(f"[{stamp}] [{entry.get('category')}] {entry.get('message')}{reason}")
     if not rows:
         # Nothing printed must not read as "nothing happened": say what was looked at.
         what = f"'{args.category}' rows" if args.category else "rows"
@@ -695,8 +834,9 @@ def cmd_input_tap(args: argparse.Namespace, project_path: Path) -> int:
 
 
 def cmd_input_clear(args: argparse.Namespace, project_path: Path) -> int:
-    """Release every action DevTools holds."""
-    result = send_command(project_path, "input_clear")
+    """Release every action DevTools holds. It closes every run of the loop, also after
+    the game died: it waits as long as `ping` and `quit`."""
+    result = send_command(project_path, "input_clear", timeout=5.0)
 
     def show(reply: dict) -> None:
         cleared = (reply.get("data") or {}).get("cleared_actions") or []
@@ -775,15 +915,17 @@ def clear_inputs_after_sequence_failure(project_path: Path) -> None:
         print(f"Warning: could not clear simulated inputs: {message}", file=sys.stderr)
 
 
-def sequence_screenshots(outcome: dict) -> list[str]:
-    """The files the `screenshot` steps of a finished sequence wrote, in step order."""
+def sequence_screenshots(outcome: dict, written: bool = True) -> list[str]:
+    """The files the `screenshot` steps of a finished sequence wrote, in step order; with
+    `written` false, the files they could not write. The game marks such a step "error"."""
     paths: list[str] = []
     for row in outcome.get("results") or []:
         if not isinstance(row, dict) or row.get("type") != "screenshot":
             continue
         result = row.get("result")
-        if isinstance(result, dict) and result.get("path"):
-            paths.append(str(result["path"]))
+        path = result.get("path") if isinstance(result, dict) else None
+        if path and (row.get("status") == "ok") == written:
+            paths.append(str(path))
     return paths
 
 
@@ -811,6 +953,8 @@ def cmd_input_sequence(args: argparse.Namespace, project_path: Path) -> int:
             raise RuntimeError("the game returned no sequence id")
         # The game enforces `timeout`; the margin covers its screenshots and this polling.
         result = wait_for_sequence_result(project_path, sequence_id, timeout=args.timeout + 15.0)
+    except NoMailboxError:
+        raise  # nothing was sent, so nothing is held
     except NoResponseError:
         clear_inputs_after_sequence_failure(project_path)
         raise
@@ -829,6 +973,8 @@ def cmd_input_sequence(args: argparse.Namespace, project_path: Path) -> int:
     # Also after a failure: the captures taken before the failing step are there to open.
     for path in sequence_screenshots(outcome):
         print(f"Screenshot saved: {path}")
+    for path in sequence_screenshots(outcome, written=False):
+        print(f"Screenshot not written: {path}", file=sys.stderr)
     if passed:
         print(f"Sequence passed: {outcome.get('completed_steps', 0)}/{len(steps)} steps")
     else:

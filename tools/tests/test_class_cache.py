@@ -5,11 +5,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from _gate_fixtures import PWSH, REPO, clean_env, run_powershell
+from _gate_fixtures import NEEDS_PWSH, REPO, clean_env, run_powershell
 
 CLASS_CACHE = REPO / "tools" / "class_cache.ps1"
 
-pytestmark = pytest.mark.skipif(PWSH is None, reason="PowerShell 7 (pwsh) is not installed")
+pytestmark = NEEDS_PWSH
 
 
 def _script(path: Path, class_name: str) -> None:
@@ -63,6 +63,17 @@ def test_scan_keeps_ordinary_nested_folders_and_addons(project: Path) -> None:
     assert "Leaf res://scripts/deep/deeper/leaf.gd" in entries
     # Godot registers addon classes too, whatever kit.json source.exclude says.
     assert "PluginTool res://addons/plugin/tool.gd" in entries
+
+
+def test_scan_reads_the_extension_in_any_letter_case_and_the_keyword_in_one(project: Path) -> None:
+    """Godot registers the class of Loud.GD, on Linux too (measured with 4.7.2): left out
+    of the scan it would be "only in cache" for ever, and every run would import again.
+    `Class_Name` is no keyword. tools/ci/class_cache.py reads both the same way."""
+    _script(project / "scripts" / "Loud.GD", "Loud")
+    shouted = "Class_Name Shouted\nextends RefCounted\n"
+    (project / "scripts" / "shouted.gd").write_text(shouted, encoding="ascii")
+    found = sorted(_entries(project))
+    assert found == ["Loud res://scripts/Loud.GD", "Real res://scripts/real.gd"]
 
 
 def test_scan_does_not_follow_a_link_to_an_ancestor(project: Path) -> None:

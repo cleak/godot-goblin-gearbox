@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 
 import pytest
-from _gate_fixtures import PWSH, copy_tools, run_tool, write, write_kit_json
+from _gate_fixtures import NEEDS_PWSH, copy_tools, linux_only, run_tool, write, write_kit_json
 
-pytestmark = pytest.mark.skipif(PWSH is None, reason="PowerShell 7 (pwsh) is not installed")
+pytestmark = NEEDS_PWSH
 
 SCRIPT = "Write-Host 'hi'\r\n# a second line\r\n"
 EM_DASH = "—"
@@ -67,6 +67,17 @@ def test_bom_and_characters_are_both_reported(tmp_path: Path) -> None:
     assert "UTF-8 BOM present" in output
     assert "line 1: U+2014" in output and "line 10: U+2014" in output
     assert "line 11: U+2014" not in output and "... and 4 more" in output  # a long list is cut
+
+
+@linux_only("a folder that holds a.ps1 beside A.ps1")
+def test_scripts_that_differ_only_in_letter_case_are_both_checked(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    write(root / "tools" / "seeded.ps1", SCRIPT)
+    (root / "tools" / "SEEDED.ps1").write_bytes(f"# dash {EM_DASH} here\r\n".encode())
+    code, output = _run(root)
+    assert code == 1, output
+    assert "FAIL  tools/SEEDED.ps1" in output and "line 1: U+2014" in output
+    assert "1 of 6 script(s) are not BOM-less ASCII" in output
 
 
 def test_folders_the_project_does_not_author_are_not_checked(tmp_path: Path) -> None:

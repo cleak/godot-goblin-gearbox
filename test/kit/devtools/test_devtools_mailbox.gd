@@ -86,7 +86,18 @@ func test_commands_of_several_clients_are_all_taken_and_answered_apart() -> void
 	assert_str(_text(_mailbox.result_file("a1"))).is_equal('{"n": 1}')
 	assert_str(_text(_mailbox.result_file("b2"))).is_equal('{"n": 2}')
 	# Only whole replies are ever visible: no temporary file is left.
-	assert_int(DirAccess.get_files_at(_mailbox.results_path).size()).is_equal(2)
+	assert_int(Mailbox.files_in(_mailbox.results_path).size()).is_equal(2)
+
+
+## A name that begins with "." is a hidden file on Linux and macOS, and an ordinary one on
+## Windows: the mailbox sees it on each.
+func test_every_file_of_a_folder_is_listed_hidden_ones_included() -> void:
+	_write(_mailbox.commands_path.path_join(".c3.json.x1.tmp"), "{}")
+	_write(_mailbox.command_file("a1"), "{}")
+	var files: PackedStringArray = Mailbox.files_in(_mailbox.commands_path)
+	files.sort()
+	assert_array(files).is_equal(PackedStringArray([".c3.json.x1.tmp", "a1.json"]))
+	assert_array(Mailbox.files_in(_mailbox.root_path.path_join("no_such_folder"))).is_empty()
 
 
 func test_half_written_command_is_retried_then_read_whole() -> void:
@@ -192,10 +203,13 @@ func test_log_appends_after_another_writer() -> void:
 func test_clear_stale_files_drops_commands_and_results_and_keeps_the_log() -> void:
 	_write(_mailbox.command_file("old"), '{"action": "quit"}')
 	_write(_mailbox.result_file("old"), "{}")
+	# What a client, or the game, leaves when it is killed between writing and renaming.
+	_write(_mailbox.commands_path.path_join(".old.json.x1.tmp"), '{"action": "qu')
+	_write(_mailbox.results_path.path_join(".old.tmp"), "{")
 	_mailbox.post_log(Mailbox.log_row("system", "kept", null), "")
 	_mailbox.clear_stale_files()
-	assert_int(DirAccess.get_files_at(_mailbox.commands_path).size()).is_zero()
-	assert_int(DirAccess.get_files_at(_mailbox.results_path).size()).is_zero()
+	assert_int(Mailbox.files_in(_mailbox.commands_path).size()).is_zero()
+	assert_int(Mailbox.files_in(_mailbox.results_path).size()).is_zero()
 	assert_int(_log_lines().size()).is_equal(1)
 
 
@@ -233,7 +247,7 @@ func test_the_folders_come_back_if_they_are_removed_while_running() -> void:
 
 func _remove_files() -> void:
 	for folder: String in [_mailbox.commands_path, _mailbox.results_path, _mailbox.root_path]:
-		for file: String in DirAccess.get_files_at(folder):
+		for file: String in Mailbox.files_in(folder):
 			DirAccess.remove_absolute(folder.path_join(file))
 
 

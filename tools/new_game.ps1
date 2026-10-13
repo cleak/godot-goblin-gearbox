@@ -5,9 +5,12 @@
 #   config/description  an optional one-line blurb
 #
 # Running it again with the same arguments rewrites the same values.
-# config/name also names the user:// data folder
-# (%APPDATA%\Godot\app_userdata\<name>\ on Windows), so a rename starts with
-# empty saves, settings and screenshots; the old folder is left in place.
+# config/name also names the user:// data folder, app_userdata/<name> under
+#   Windows  %APPDATA%\Godot
+#   Linux    ~/.local/share/godot   ($XDG_DATA_HOME/godot when that is set)
+#   macOS    ~/Library/Application Support/Godot
+# so a rename starts with empty saves, settings and screenshots; the old folder
+# is left in place.
 #
 # -RemoveKitTests also deletes the kit's own tests, tools/tests/ (pytest) and
 # test/kit/ (gdUnit4), and nothing else: they test the kit's tools, not your
@@ -111,9 +114,10 @@ if ($RemoveKitTests) {
 
 Write-Host ""
 Write-Host "Done. Next:" -ForegroundColor Cyan
-Write-Host "  pwsh ./tools/setup.ps1    # toolchain, first import, prerequisite check"
-Write-Host "  pwsh ./tools/check.ps1    # every gate: lint, type check, tests"
-Write-Host "  pwsh ./tools/godot.ps1    # run the game (-e opens the editor)"
+# The words first: after a command, a zsh somebody types into takes "# ..." for arguments.
+Write-Host "  toolchain, first import, prerequisite check:  pwsh ./tools/setup.ps1"
+Write-Host "  every gate (lint, type check, tests):         pwsh ./tools/check.ps1"
+Write-Host "  the game (-e opens the editor):               pwsh ./tools/godot.ps1"
 if (Test-Path -LiteralPath (Join-Path $projectRoot "export_presets.cfg")) {
     Write-Host "  export_presets.cfg has its own product name fields; update them too."
 }

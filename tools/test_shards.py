@@ -18,8 +18,9 @@ collide. Nothing needs configuring: a fresh project just runs.
   main, origin/master, master. Outside a git repository, or with no base branch, it says
   so and runs every suite. On the base branch itself (commits on a main that has no
   remote copy) only uncommitted files count, and a note says so.
-- Paths (files or folders; `res://test/unit` and `test/unit` are the same) run exactly
-  those suites.
+- Paths (files or folders) run exactly those suites. `res://test/unit`, `test/unit` and
+  `test\\unit` are the same folder on every system; an absolute path is read as this
+  system writes it.
 - "Heavy" is a suite recorded at `--heavy-seconds` or more, or on the slow list.
 
 What a suite is (tools/ci/suites.py): a .gd file whose bases reach GdUnitTestSuite, by
@@ -50,8 +51,9 @@ Before the first shard starts, a missing or stale class cache is rebuilt
 
 Every test case runs: a failure does not stop the cases after it. The run ends with
 one line per failure (file, line, case, what was expected). A shard that broke some
-other way (a script error, a crash, a timeout) has its whole log printed; `--verbose`
-prints it for every failed shard. gdUnit4's HTML and XML reports go to
+other way (a script error, a crash, a timeout) has its log printed, each Godot error
+once and without its GDScript backtrace; `--verbose` prints the whole log of every
+failed shard. gdUnit4's HTML and XML reports go to
 artifacts/gdunit-shards/run_<pid>/ and are deleted with the shard logs unless `--keep`
 is given.
 
@@ -60,6 +62,20 @@ that never reported, a script error in the output (gdUnit4 exits 0 on a suite th
 fails to parse, so the output is scanned), a test script that is not a suite, or a list
 file that names a missing suite. 124 on a timeout. 2 on a usage or setup error (bad
 argument or path, unreadable kit.json or timings file, no Godot, no gdUnit4).
+
+Stopping a run (Ctrl+C, SIGTERM, SIGHUP, SIGQUIT) kills its shards, frees its slots and
+removes its folders; the exit code is 128 + the signal's number (130, 143, 129, 131), and
+a signal that comes during that cleanup is ignored. Ctrl+C ends with one line.
+A run that is killed outright cleans up nothing, but its Godot processes still end with
+it (tools/ci/slot_pool.py).
+
+A suite must end what it starts. A process a shard left running: Linux ends it with the
+shard and names it in a line of its own; on Windows the shard does not end while it
+runs, so it times out; macOS leaves one that OS.create_process started.
+
+File names that are not ASCII need Python to read names as UTF-8, which it does unless
+its UTF-8 mode is switched off under a locale that is not UTF-8; then a suite with such
+a name is a setup error.
 
 The Godot binary comes from GODOT_BIN or the resolver, never from an argument, and the
 data files (`--timings`, `--slow-list`, `--always-list`, `--write-timings`) must lie
@@ -71,19 +87,21 @@ test path, whatever the working folder. `--write-timings` replaces only a timing
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import json
 import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -128,6 +146,11 @@ GDUNIT_PASS = (0, 101)
 GDUNIT_FAILURES = 100
 FAILURE_DETAIL_CHARS = 300
 EXIT_TIMEOUT = 124
+# The variable that moves Godot's user data folder, where it is not XDG_DATA_HOME (Linux).
+USER_DATA_VARIABLE = {"windows": "APPDATA", "macos": "HOME"}
+# Signals that end a run; the exit code is 128 + the signal's number. SIGINT is Ctrl+C.
+STOP_SIGNALS = ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")
+INTERRUPTED = "Stopped by Ctrl+C."
 
 
 @dataclass
@@ -163,6 +186,15 @@ def local_path(suite: str) -> Path:
     return CONFIG.root / suite.removeprefix("res://")
 
 
+def typed_path(text: str) -> Path:
+    """Where a path from the command line points: `res://test/unit`, `test/unit`,
+    `test\\unit` and `test/unit/` are one folder of the project on every system; an
+    absolute path is read as this system writes it."""
+    if text.startswith("res://"):
+        text = text.removeprefix("res://").strip("/") or "."
+    return kit_config.project_path(text or ".", CONFIG.root)
+
+
 def shown(path: str | Path) -> str:
     """A path for a message: project-relative when it is inside the project."""
     full = Path(path).resolve()
@@ -185,11 +217,11 @@ def find_suites(roots: list[str]) -> Found:
     """The gdUnit4 suites under the given files and folders: `res://test/unit`,
     `test/unit` and `test/unit/` are one path, as for tools/test.ps1. Folders Godot does
     not scan (dot-folders, .gdignore, nested projects) are skipped. Raises ValueError
-    for a path that does not exist or lies outside the project."""
+    for a path that does not exist or lies outside the project, and for a suite whose
+    name this Python holds escaped (see `names_are_utf8`)."""
     files: set[Path] = set()
     for root in roots:
-        local = root.removeprefix("res://").strip("/") or "."
-        files.update(kit_config.source_files((".gd",), path=local, config=CONFIG))
+        files.update(kit_config.source_files((".gd",), path=typed_path(root), config=CONFIG))
     # Who extends whom is read over the whole test folder: a base suite and the suites
     # built on it need not both be under the paths asked for.
     known = set(files)
@@ -207,7 +239,21 @@ def find_suites(roots: list[str]) -> Found:
             found.reports[f"res://{script}"] = f"res://{index.reported_as(script)}"
         elif kinds[script] == suite_rules.NOT_A_SUITE and CONFIG.test_dir in path.parents:
             found.not_suites.append(f"{script} ({index.describe_base(script)})")
+    escaped = [] if names_are_utf8() else [suite for suite in found.suites if not suite.isascii()]
+    if escaped:
+        raise ValueError(
+            f"{escaped[0]}: a file name that is not ASCII needs Python to read names as "
+            f"UTF-8, and here it reads them as {sys.getfilesystemencoding()}. Fix: unset "
+            "PYTHONUTF8 and PYTHONCOERCECLOCALE, or use a UTF-8 locale (LC_ALL=C.UTF-8)"
+        )
     return found
+
+
+def names_are_utf8() -> bool:
+    """False when Python's UTF-8 mode is off under a locale that is not UTF-8. A file
+    name that is not ASCII is then held as escaped bytes: not the name gdUnit4 reports,
+    a list file spells or git prints, so its suite would count as never reported."""
+    return codecs.lookup(sys.getfilesystemencoding()).name == "utf-8"
 
 
 def discover(roots: list[str]) -> list[str]:
@@ -353,6 +399,41 @@ def shard_failure(code: int, output: str) -> str | None:
     return None
 
 
+BACKTRACE = re.compile(r"^\s*GDScript backtrace")
+BACKTRACE_FRAME = re.compile(r"^\s*\[\d+\]\s")
+GODOT_ERROR = re.compile(r"^\s*(SCRIPT )?ERROR:")
+ERROR_PLACE = re.compile(r"^\s+at:")
+
+
+def without_repeats(output: str) -> str:
+    """A failed shard's log without what only repeats: Godot prints a GDScript backtrace
+    under every script error, and a script that does not compile is reported again by
+    everything that loads it. Each error (its line and the "at:" line under it) is kept
+    once. tools/check.ps1 Get-GateFindings shows a failed gate the same way."""
+    kept: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    lines = output.splitlines()
+    in_backtrace = False
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        if BACKTRACE.match(line):
+            in_backtrace = True
+            continue
+        if in_backtrace and BACKTRACE_FRAME.match(line):
+            continue
+        in_backtrace = False
+        if GODOT_ERROR.match(line) and index < len(lines) and ERROR_PLACE.match(lines[index]):
+            error = (line.strip(), lines[index].strip())
+            if error in seen:
+                index += 1
+                continue
+            seen.add(error)
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def failure_line(suite: str, case: str, problem: ET.Element) -> str:
     """One line for a failed case: where, which case, and what gdUnit4 expected.
     gdUnit4 writes `message="FAILED: res://path.gd:70"` and the expectation as text.
@@ -405,12 +486,23 @@ def parse_results(report_dir: Path) -> list[SuiteResult]:
     return results
 
 
-def shard_env(user_dir: Path) -> dict[str, str]:
-    """Godot keeps user:// under APPDATA (Windows) or XDG_DATA_HOME (Linux)."""
-    env = os.environ.copy()
-    env["XDG_DATA_HOME"] = str(user_dir)
-    env["APPDATA"] = str(user_dir)
-    return env
+def shard_env(
+    user_dir: Path, platform: str | None = None, env: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """`env` (default: this process's) for one shard on `platform` (default: this one),
+    with the folder Godot keeps user:// under moved to `user_dir`. Godot 4.7 reads
+    %APPDATA% on Windows, $XDG_DATA_HOME on Linux and, on macOS, $HOME alone: there the
+    shard, and whatever a test starts from it, sees `user_dir` as the home folder.
+
+    `user_dir` must be an absolute path: Godot ignores a relative XDG_DATA_HOME and would
+    use the developer's folder. tools/godot_resolver.ps1 Get-KitUserDataEnvironment is the
+    same rule for tools/test.ps1 (tools/tests/test_resolver_parity.py compares the two)."""
+    if not Path(user_dir).is_absolute():
+        raise ValueError(f"shard_env: user_dir must be an absolute path; it is '{user_dir}'.")
+    shard = dict(os.environ if env is None else env)
+    variable = USER_DATA_VARIABLE.get(platform or kit_config.host_platform(), "XDG_DATA_HOME")
+    shard[variable] = str(user_dir)
+    return shard
 
 
 def reports_dir() -> Path:
@@ -576,6 +668,7 @@ class Job:
     slot_count: int
     # Suite -> the res:// path gdUnit4 reports it under (see suites.reported_as).
     reports: dict[str, str]
+    pool: slot_pool.SlotPool
 
 
 def prepare(args: argparse.Namespace) -> Job | int:
@@ -627,7 +720,9 @@ def prepare(args: argparse.Namespace) -> Job | int:
     if not args.no_import and class_cache.is_stale(CONFIG):
         print("Class cache missing or out of date: importing the project...", flush=True)
         class_cache.ensure(godot, CONFIG)
-    return Job(suites, shards, godot, slot_count, found.reports)
+    # A slot folder that cannot be used is a setup error too (slot_pool.SlotError).
+    pool = slot_pool.SlotPool(slot_count, slot_pool.slot_directory())
+    return Job(suites, shards, godot, slot_count, found.reports, pool)
 
 
 def claim_reports(shard: Shard, results: list[SuiteResult], reports: dict[str, str]) -> None:
@@ -650,7 +745,7 @@ def claim_reports(shard: Shard, results: list[SuiteResult], reports: dict[str, s
 def execute(args: argparse.Namespace, job: Job, work: Path) -> int:
     """Run the shards and report. `work` holds the shard logs and user data folders."""
     suites, shards, godot, slot_count = job.suites, job.shards, job.godot, job.slot_count
-    pool = slot_pool.SlotPool(slot_count, slot_pool.slot_directory())
+    pool = job.pool
     parts = sum(len(shard.items) for shard in shards)
     print(
         f"Running {len(suites)} suites ({parts} parts) in {len(shards)} shards "
@@ -688,17 +783,24 @@ def execute(args: argparse.Namespace, job: Job, work: Path) -> int:
                 if code is not None:
                     codes[index] = code
                     cpu_seconds += group.cpu_seconds() or 0.0
-                    group.close()
+                    left = group.close()
                     slot.release()
                     print(
                         f"  shard {index}: exit {code} after {time.monotonic() - started:.0f}s "
                         f"({time.monotonic() - launched:.0f}s running)",
                         flush=True,
                     )
+                    if left:
+                        print(
+                            f"  shard {index} left {len(left)} process(es) running, now "
+                            f"ended: {'; '.join(left)}",
+                            flush=True,
+                        )
                     del running[index]
                     continue
                 if shard_expired(launched, time.monotonic(), args.timeout):
                     timed_out = True
+                    cpu_seconds += group.cpu_seconds() or 0.0
                     group.kill()
                     group.close()
                     slot.release()
@@ -753,9 +855,15 @@ def execute(args: argparse.Namespace, job: Job, work: Path) -> int:
         ordinary = codes[shard.index] == GDUNIT_FAILURES and reason.startswith("exit")
         if ordinary and 0 < counted <= listed and not args.verbose:
             print(f"  shard {shard.index} FAILED ({reason}): failed cases are listed below")
-        else:
+        elif args.verbose:
             print(f"\n===== shard {shard.index} FAILED ({reason}); log follows =====")
             print(ANSI.sub("", output))
+        else:
+            print(
+                f"\n===== shard {shard.index} FAILED ({reason}); log follows, each error "
+                "once (--verbose: all of it) ====="
+            )
+            print(without_repeats(ANSI.sub("", output)))
 
     # Every part of every suite must report, or a suite silently failed to load.
     expected = Counter(item.suite for shard in shards for item in shard.items)
@@ -863,7 +971,7 @@ def project_files(args: argparse.Namespace) -> None:
         if not value:
             continue
         name = flag.replace("_", "-")
-        full = (CONFIG.root / value).resolve()
+        full = kit_config.project_path(value, CONFIG.root).resolve()
         if CONFIG.root not in full.parents:
             raise ValueError(f"--{name} must name a file inside the project: {value}")
         if full.is_dir():
@@ -993,8 +1101,44 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, ValueError, RuntimeError) as error:
         print(error, file=sys.stderr)
         return 2
-    return job if isinstance(job, int) else run(args, job)
+    if isinstance(job, int):
+        return job
+    try:
+        return run(args, job)
+    except slot_pool.SlotError as error:
+        # The slot folder stopped working under the run (removed, its disk gone): the
+        # shards were killed on the way here, and the machine needs fixing, not a test.
+        print(error, file=sys.stderr)
+        return 2
+
+
+def stop_on_signals() -> None:
+    """Make Ctrl+C, SIGTERM, SIGHUP and SIGQUIT (an agent's timeout, a closed terminal)
+    end the run one way: on the way out the shards are killed and the run's folders
+    removed, and the exit code is 128 + the signal. Once: a signal that comes during
+    that cleanup must not cut it short."""
+    numbers = [getattr(signal, name) for name in STOP_SIGNALS if hasattr(signal, name)]
+
+    def stop(number: int, _frame: object) -> None:
+        for other in numbers:
+            signal.signal(other, signal.SIG_IGN)
+        raise SystemExit(128 + number)
+
+    for number in numbers:
+        signal.signal(number, stop)
+
+
+def run_as_program() -> int:
+    """main() as the program's exit code. A run stopped by Ctrl+C says so in one line
+    where Python would print a traceback."""
+    stop_on_signals()
+    try:
+        return main()
+    except SystemExit as stopped:
+        if stopped.code == 128 + signal.SIGINT:
+            print(INTERRUPTED, file=sys.stderr)
+        raise
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_as_program())

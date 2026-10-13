@@ -2,9 +2,8 @@
 
 `compare.py` compares a screenshot with a baseline of the same size.
 
-```powershell
-uv run python tools/visual_diff/compare.py baselines/menu.png artifacts/shots/menu.png `
-  --output-dir artifacts/visual/menu --max-rms 2 --max-changed-fraction 0.01
+```sh
+uv run python tools/visual_diff/compare.py baselines/menu.png artifacts/shots/menu.png --output-dir artifacts/visual/menu --max-rms 2 --max-changed-fraction 0.01
 ```
 
 | Output | What |
@@ -31,6 +30,12 @@ Godot version, renderer, window size, random seed, camera, and the frame you cap
 on (wait a fixed number of frames, not a time). Capture on the same GPU and driver, or
 loosen the limits. Capture the scene twice before you approve a baseline: if the two
 differ, pass the second as `--noise`, or the diff will fail on its own.
+
+Across systems: a capture of the sample game made on Linux under Xvfb (Mesa's software
+renderer) passes the defaults against a baseline made on Windows: rms 0.91, no changed pixel.
+Most pixels still differ by 1 to 4 levels, under `--pixel-threshold`. So `--noise` captures
+must come from the system that made the baseline: any difference at all is noise, and
+captures from the other system mask most of the image (`noise_mask_too_large`).
 
 A passing diff says the picture did not change, not that it is right. Pair it with a
 test that asserts what the scene contains.
