@@ -1,0 +1,70 @@
+# Strict GDScript lint rules for gdtoolkit (gdlint 4.x).
+# Run via: pwsh ./tools/lint_gdscript.ps1   (or: gdlint <path>)
+#
+# Nothing is disabled. Tighten rules here; do not loosen them per file.
+disable: []
+
+# Third-party and generated code is not linted. tools/lint_gdscript.ps1 picks the
+# files (kit.json source.exclude / source.include); this list only covers a bare
+# `gdlint .` run.
+excluded_directories: !!set
+  .git: null
+  .godot: null
+  .venv: null
+  .tools: null
+  artifacts: null
+  gdUnit4: null
+
+# --- Structure: one predictable order for every class body ---
+class-definitions-order:
+- tools
+- classnames
+- extends
+- docstrings
+- signals
+- enums
+- consts
+- staticvars
+- exports
+- pubvars
+- prvvars
+- onreadypubvars
+- onreadyprvvars
+- others
+
+# --- Size limits ---
+max-file-lines: 1000
+max-line-length: 100
+max-public-methods: 20
+max-returns: 6
+function-arguments-number: 10
+
+# --- Whitespace (Godot uses tabs) ---
+tab-characters: 1
+trailing-whitespace: null
+mixed-tabs-and-spaces: null
+
+# --- Correctness smells ---
+comparison-with-itself: null
+duplicated-load: null
+expression-not-assigned: null
+unnecessary-pass: null
+unused-argument: null
+no-elif-return: null
+no-else-return: null
+
+# --- Naming ---
+class-name: ([A-Z][a-z0-9]*)+
+sub-class-name: _?([A-Z][a-z0-9]*)+
+class-load-variable-name: (([A-Z][a-z0-9]*)+|_?[a-z][a-z0-9]*(_[a-z0-9]+)*)
+class-variable-name: _?[a-z][a-z0-9]*(_[a-z0-9]+)*
+constant-name: _?[A-Z][A-Z0-9]*(_[A-Z0-9]+)*
+load-constant-name: (([A-Z][a-z0-9]*)+|_?[A-Z][A-Z0-9]*(_[A-Z0-9]+)*)
+enum-name: ([A-Z][a-z0-9]*)+
+enum-element-name: '[A-Z][A-Z0-9]*(_[A-Z0-9]+)*'
+function-name: (_on_([A-Z][a-z0-9]*)+(_[a-z0-9]+)*|_?[a-z][a-z0-9]*(_[a-z0-9]+)*)
+function-argument-name: _?[a-z][a-z0-9]*(_[a-z0-9]+)*
+function-preload-variable-name: ([A-Z][a-z0-9]*)+
+function-variable-name: '[a-z][a-z0-9]*(_[a-z0-9]+)*'
+loop-variable-name: _?[a-z][a-z0-9]*(_[a-z0-9]+)*
+signal-name: '[a-z][a-z0-9]*(_[a-z0-9]+)*'

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "godot-devtools": {
+      "command": "uv",
+      "args": ["run", "python", "tools/mcp/server.py"],
+      "env": {
+        "GODOT_AGENT_SESSION": "agent-1"
+      }
+    }
+  }
+}

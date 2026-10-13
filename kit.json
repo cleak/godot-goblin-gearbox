@@ -1,0 +1,21 @@
+{
+  "godot": {
+    "version": "4.7.2",
+    "windows_x86_64_sha512": "83decd58fdf67b9d657958a1ae6bf1929c20785315a81effe245874cdc57acb709bf868e00778a96984338c1b29dafdb453c6847747694621c6ecf5da2259993",
+    "search_roots": []
+  },
+  "gdunit4": {
+    "version": "6.2.2",
+    "source_archive_sha256": "ddb44730ffb9cd77fd70d283753450759b00c5016143d7572bf63625f64d5433"
+  },
+  "source": {
+    "exclude": ["addons", "artifacts", "docs"],
+    "include": ["addons/agent_devtools"]
+  },
+  "tests": {
+    "root": "test"
+  },
+  "gdscript": {
+    "strict": true
+  }
+}

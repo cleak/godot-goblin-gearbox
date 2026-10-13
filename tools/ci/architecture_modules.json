@@ -1,0 +1,40 @@
+{
+  "_readme": [
+    "Layering rules for tools/check_architecture.py. Delete this file to switch the check off.",
+    "modules: a .gd file belongs to the first module whose globs match it, so order matters.",
+    "  globs       Project-relative paths. * stays inside one folder, ** crosses folders.",
+    "              A glob that matches nothing fails; write {\"glob\": \"...\", \"optional\": true}",
+    "              for one that may.",
+    "  may_depend  Modules this one may name (class_name, autoload, preload, load, extends).",
+    "              \"*\" allows any. A module may always name itself.",
+    "  pure        true: no Node-derived class, no signal, no autoload. Logic that runs",
+    "              headless, without a scene tree.",
+    "ignore: globs for scripts the check leaves alone. A script in no module and not",
+    "        ignored fails, so a new folder cannot dodge the rules.",
+    "cycles: true (the default) fails scripts that preload or extend each other in a",
+    "        ring; false turns that rule off.",
+    "To add a layer: add a module here, then name it in the may_depend of each module",
+    "that is allowed to use it. Example, a UI layer over the game:",
+    "  \"ui\": {\"globs\": [\"scripts/ui/**\"], \"may_depend\": [\"core\", \"game\"]}",
+    "placed before \"game\" if scripts/ui sits inside a folder that game's globs also match."
+  ],
+  "modules": {
+    "core": {
+      "_note": "Rules and data: RefCounted and Resource scripts only.",
+      "globs": ["scripts/core/**"],
+      "may_depend": [],
+      "pure": true
+    },
+    "game": {
+      "_note": "Nodes and scenes' scripts, including any script beside project.godot.",
+      "globs": ["scripts/game/**", {"glob": "*.gd", "optional": true}],
+      "may_depend": ["core"]
+    },
+    "tests": {
+      "globs": ["test/**"],
+      "may_depend": ["*"]
+    }
+  },
+  "ignore": ["addons/**", "tools/**"],
+  "cycles": true
+}

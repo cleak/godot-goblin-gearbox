@@ -1,0 +1,19 @@
+# Style hooks for changed .gd files: gdlint (rules in .gdlintrc) and gdformat.
+#   uv sync
+#   uv run pre-commit install
+#   uv run pre-commit run --all-files
+#
+# Style only. The engine's strict type check needs the Godot binary:
+# pwsh ./tools/typecheck.ps1 (or pwsh ./tools/check.ps1 for every gate).
+#
+# Third-party addons are left alone; addons/agent_devtools is the kit's own and
+# is linted like the rest (kit.json source.include lists it for the other gates).
+repos:
+  - repo: https://github.com/Scony/godot-gdscript-toolkit
+    rev: 4.5.0
+    hooks:
+      - id: gdlint
+        exclude: ^addons/(?!agent_devtools/)
+      - id: gdformat
+        args: ["--line-length", "100"]
+        exclude: ^addons/(?!agent_devtools/)

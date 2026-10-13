@@ -1,0 +1,37 @@
+[gd_scene format=3 uid="uid://c7f4sqi71p48p"]
+
+[ext_resource type="Script" uid="uid://bhjdo804b64fd" path="res://scripts/game/game.gd" id="1_game"]
+[ext_resource type="Script" uid="uid://cnb07hbtsm5cx" path="res://scripts/game/dev_commands.gd" id="2_dev"]
+
+[node name="Main" type="Node2D"]
+position = Vector2(352, 164)
+script = ExtResource("1_game")
+player_path = NodePath("Player")
+status_path = NodePath("Hud/Status")
+
+[node name="Player" type="Polygon2D" parent="."]
+color = Color(0.29, 0.73, 0.98, 1)
+polygon = PackedVector2Array(-13, -13, 13, -13, 13, 13, -13, 13)
+
+[node name="DevCommands" type="Node" parent="."]
+script = ExtResource("2_dev")
+
+[node name="Hud" type="CanvasLayer" parent="."]
+
+[node name="Status" type="Label" parent="Hud"]
+offset_left = 24.0
+offset_top = 16.0
+offset_right = 624.0
+offset_bottom = 48.0
+text = "Lamps 0/3   Moves 0"
+
+[node name="Help" type="Label" parent="Hud"]
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 24.0
+offset_top = -48.0
+offset_right = 824.0
+offset_bottom = -16.0
+grow_vertical = 0
+text = "Arrows / WASD: move     E / Space: light the lamp     P / Esc: pause"

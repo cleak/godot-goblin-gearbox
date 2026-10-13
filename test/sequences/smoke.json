@@ -1,0 +1,26 @@
+{
+  "description": "Reset the board, walk to a lamp, light it, pause, resume, screenshot",
+  "steps": [
+    {"type": "call", "action": "reset"},
+    {"type": "assert", "node": ".", "property": "player_cell", "equals": {"x": 3, "y": 2}},
+    {"type": "tap", "action": "move_right"},
+    {"type": "tap", "action": "move_right"},
+    {"type": "tap", "action": "move_up"},
+    {"type": "assert", "node": ".", "property": "player_cell", "equals": {"x": 5, "y": 1}},
+    {"type": "tap", "action": "interact"},
+    {"type": "assert", "node": ".", "property": "lit_count", "equals": 1},
+    {"type": "tap", "action": "pause"},
+    {"type": "assert", "node": ".", "property": "paused", "equals": true},
+    {"type": "tap", "action": "move_left"},
+    {"type": "assert", "node": ".", "property": "player_cell", "equals": {"x": 5, "y": 1}},
+    {"type": "tap", "action": "pause"},
+    {
+      "type": "wait",
+      "seconds": 2.0,
+      "until": {"node": "Player", "property": "position", "equals": {"x": 352, "y": 96}}
+    },
+    {"type": "assert", "node": "Hud/Status", "property": "text", "equals": "Lamps 1/3   Moves 3"},
+    {"type": "assert", "node": "Player", "property": "position:x", "ge": 351.5},
+    {"type": "screenshot", "filename": "smoke.png"}
+  ]
+}

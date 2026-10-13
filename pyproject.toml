@@ -1,0 +1,35 @@
+[project]
+name = "godot-goblin-gearbox-tools"
+version = "0.1.0"
+description = "Python tooling for a Godot GDScript project: DevTools CLI, test shards, checks, visual diff"
+requires-python = ">=3.12"
+# The tools themselves need only the standard library.
+dependencies = []
+
+[dependency-groups]
+dev = [
+  # gdlint and gdformat (tools/lint_gdscript.ps1); keep in step with .pre-commit-config.yaml.
+  "gdtoolkit==4.5.0",
+  # tools/visual_diff/compare.py.
+  "pillow>=11,<13",
+  "pre-commit>=4,<5",
+  "pytest>=8.3,<9",
+  # tools/check.ps1 runs tools/tests on several workers (tools/tests/conftest.py).
+  "pytest-xdist>=3.6,<4",
+  "ruff>=0.9,<1",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tools/tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["addons", "artifacts", ".tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

@@ -1,0 +1,39 @@
+# Text is stored with LF. gdformat and some editors write CRLF on Windows; git turns it
+# back into LF on commit.
+* text=auto eol=lf
+
+# cmd.exe misreads a batch file with LF line endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.svg text
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.bmp binary
+*.tga binary
+*.ico binary
+*.exr binary
+*.hdr binary
+*.glb binary
+*.fbx binary
+*.blend binary
+*.res binary
+*.scn binary
+*.ogg binary
+*.wav binary
+*.mp3 binary
+*.ogv binary
+*.webm binary
+*.mp4 binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.pck binary
+*.exe binary
+*.dll binary
