@@ -34,7 +34,7 @@ def test_flags_typed_declarations() -> None:
     text = "\n".join(
         [
             "func a() -> void:",
-            "\tvar out: Array[StringName] = m.species() if m != null else []",
+            "\tvar out: Array[StringName] = m.names() if m != null else []",
             "\tvar d: Dictionary[int, int] = {} if m == null else m.held()",
             "\tvar ok: Array[StringName] = []",
             "\tvar plain: Array = m.rows() if m != null else []",

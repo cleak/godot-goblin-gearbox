@@ -59,7 +59,8 @@ Lint rules     Your .gdlintrc is kept. It judges your scripts only: the lint lea
 Removing it    tools/kit_manifest.json lists what to undo: "files" (the kit's), "seeded"
                (starter files) and "wrote": kit.json, gdUnit4, the starter test, each line
                added to .gitignore, and each project.godot edit (a section or line it
-               added, a value it replaced as "name 1 -> 2"). Steps: README.md, "Remove it".
+               added, a value it replaced as "name 1 -> 2"). Steps: docs/tools.md,
+               "Removing the kit".
 Refused        Looked for before the first write; one line, exit 1, the project as it was:
                - A link (symbolic link, junction) on the way to a file this run writes or
                  deletes. The kit writes no file through a link: git does not look behind

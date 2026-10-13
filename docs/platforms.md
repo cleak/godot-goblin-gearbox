@@ -325,12 +325,12 @@ passed in, or a fact read from documentation or source.
 
 ## Check a Mac in ten minutes
 
-Not run. In Terminal (zsh), with PowerShell 7.2 or newer, uv and git installed. Put the
-kit's address in place of `KIT_URL`; keep the game's window uncovered until the last step.
+Not run. In Terminal (zsh), with PowerShell 7.2 or newer, uv and git installed. Keep the
+game's window uncovered until the last step.
 
 ```bash
 sw_vers; uname -m; pwsh --version; uv --version; git --version; xcode-select -p
-git clone KIT_URL kit && cd kit
+git clone https://github.com/cleak/godot-goblin-gearbox kit && cd kit
 pwsh ./tools/setup.ps1 -InstallGodot 2>&1 | tee setup.log
 codesign --verify --deep --strict .tools/godot/*/Godot.app; echo "codesign $?"
 xattr -l .tools/godot/*/Godot.app

@@ -347,14 +347,14 @@ def test_a_code_span_that_wraps_is_read_on_both_lines(project: Path) -> None:
 def test_a_command_whose_script_is_gone_fails(project: Path) -> None:
     block = (
         f"{FENCE}powershell\n"
-        "pwsh ./tools/setup_input_actions_cli.ps1 -Fix\n"
+        "pwsh ./tools/make_levels.ps1 -Fix\n"
         "uv run python tools/gone.py --all\n"
         "pwsh ./tools/godot.ps1 --headless --script res://tools/gone.gd --user-args --fix\n"
         f"{FENCE}\n"
     )
     start = len(CLEAN.splitlines()) + 1
     assert findings(project, CLEAN + block) == [
-        f"AGENTS.md:{start + 1}: `tools/setup_input_actions_cli.ps1` does not exist in the project",
+        f"AGENTS.md:{start + 1}: `tools/make_levels.ps1` does not exist in the project",
         f"AGENTS.md:{start + 2}: `tools/gone.py` does not exist in the project",
         f"AGENTS.md:{start + 3}: `tools/gone.gd` does not exist in the project",
     ]
@@ -684,7 +684,9 @@ def test_no_pre_approved_godot_command_takes_engine_arguments() -> None:
 def test_a_pre_approved_devtools_command_names_its_command() -> None:
     """`devtools.py *` would also allow `devtools.py --project <another game> quit`. The
     CLI reads --project before the command only (tools/tests/test_devtools_cli.py), so a
-    rule that fixes the command drives this project's game and no other."""
+    rule that fixes the command drives this project's game and no other. The two commands
+    behind devtools/allow_mutation call any method of any node once an owner turns that on:
+    they keep their prompt."""
     allowed = json.loads(shipped(".claude/settings.json"))["permissions"]["allow"]
     rules = [rule for rule in allowed if "tools/devtools.py" in rule]
     named = [
@@ -694,5 +696,8 @@ def test_a_pre_approved_devtools_command_names_its_command() -> None:
     assert rules and all(named), rules
     parser = devtools.build_parser()
     commands = next(a.choices for a in parser._actions if isinstance(a.choices, dict))
+    asks = {"set-state", "run-method"}
+    assert asks <= set(commands)
     for shell in ("Bash", "PowerShell"):
-        assert sorted(found[2] for found in named if found[1] == shell) == sorted(commands)
+        approved = sorted(found[2] for found in named if found[1] == shell)
+        assert approved == sorted(set(commands) - asks)

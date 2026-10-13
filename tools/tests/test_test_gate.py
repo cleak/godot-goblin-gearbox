@@ -128,9 +128,9 @@ def test_what_gdunit_is_asked_to_run(tmp_path: Path) -> None:
     two = run_tool(root, "test.ps1", "test/unit", "test/other", env=env)
     assert two.returncode == 1 and "test/other" in two.stdout + two.stderr
 
-    # The old switch is gone, not silently ignored.
-    old = run_tool(root, "test.ps1", "-Continue", env=env)
-    assert old.returncode == 1 and "Continue" in old.stdout + old.stderr
+    # A switch it does not have is refused, not silently ignored.
+    unknown = run_tool(root, "test.ps1", "-Continue", env=env)
+    assert unknown.returncode == 1 and "Continue" in unknown.stdout + unknown.stderr
 
 
 def test_the_run_gets_a_user_folder_of_its_own(tmp_path: Path) -> None:

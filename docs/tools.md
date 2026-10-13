@@ -107,7 +107,9 @@ Cost on the sample game: about three and a half minutes for a full run. Windows,
 threads: 210 to 230 s. Linux, 16 cores: about 220 s. A machine busy with other work took
 four to seven minutes. All but 13 to 21 s of it is `pytest` on four workers. `-Changed` leaves `pytest`
 out while you work on the game: 13 to 17 s on Windows, 10 to 13 s on Linux. After
-`new_game.ps1 -RemoveKitTests` a full run is 11 to 15 s.
+`new_game.ps1 -RemoveKitTests` a full run is 11 to 15 s. GitHub's hosted Windows runner is
+slower: 1,026 s for a full run, 934 s of it `pytest`, measured with three quarters of today's
+Python tests. The hosted Linux runner was not measured.
 
 ## Setup
 
@@ -203,9 +205,9 @@ removed as the kit's. Let only the installer change it. It is the same on every 
 | `wrote.project_godot` | Each edit to `project.godot`, oldest first: `[autoload] DevTools`, `[editor_plugins] agent_devtools, gdUnit4` (the plugins it enabled), `[devtools] allow_mutation=false`, `[debug] name added` (a `gdscript/warnings/name=2` line), `[debug] name 1 -> 2` (a value it replaced; one entry per warning, the first), and `[debug] new section` for a section it made |
 | `unfinished` | Only after a run that stopped halfway: the starter files and test it was writing |
 
-`wrote` is what removing the kit has to undo, over every run; the kit's README lists the
-steps under "Remove it". It is written before the first file, so a run that stops halfway
-keeps it. Such a run ends with two lines, exit 1: fix what the first names and run the same
+`wrote` is what removing the kit has to undo, over every run: the steps are under
+[Removing the kit](#removing-the-kit). It is written before the first file, so a run that
+stops halfway keeps it. Such a run ends with two lines, exit 1: fix what the first names and run the same
 command again.
 
 ```text
@@ -254,13 +256,44 @@ and `tools/` alone.
 
 The first `check.ps1` in your project reports what your code does not pass yet, each finding
 with its fix. Expect `gdlint` to fail until `pwsh ./tools/check.ps1 -Fix` has formatted your
-scripts, and `project-lint` on a scene or resource without uids: its output ends with the
+scripts and you have renamed what its naming rules reject, or relaxed the rule in your
+`.gdlintrc`, and `project-lint` on a scene or resource without uids: its output ends with the
 `--fix` command that writes them. Three gates start as `skipped`: `architecture` (no layers
 declared: [architecture.md](architecture.md)), `ruff` (no Python of your own under `tools/`)
 and `pytest` (the kit's own tests are not installed). So do `shader-lint` when you have no
 shader and `scenes` when the project has no main scene. A project with neither ends its first
 clean run with `check: PASSED: 10 passed, 0 failed, 5 skipped`; with a main scene it is 11
 passed, 4 skipped. The type gate passes, and its line in the table says strict typing is off.
+
+### Removing the kit
+
+There is no uninstaller. If the install is one commit, revert it. Otherwise
+`tools/kit_manifest.json` lists what to undo:
+
+- `unfinished`, when it is there: a run stopped halfway. Run the installer again first.
+- `files`: the kit's files. Delete them, then the manifest.
+- `wrote.kit_json`, `wrote.gdunit4`: where `true`, delete `kit.json`, `addons/gdUnit4/`.
+- `wrote.starter_test`: delete that file and its `.uid`.
+- `wrote.gitignore`: delete those lines from `.gitignore`, with the `# godot-goblin-gearbox` line
+  and the blank line above it. A `.gitignore` left empty goes too; one that ended without a
+  line break got one.
+- `wrote.project_godot`: undo each entry in `project.godot`.
+
+  | Entry | Undo |
+  |---|---|
+  | `[autoload] DevTools` | Delete the `DevTools=` line |
+  | `[editor_plugins] agent_devtools, gdUnit4` | Take the paths of the plugins it names out of `enabled` |
+  | `[devtools] allow_mutation=false` | Delete the line |
+  | `[debug] name added` | Delete the `gdscript/warnings/name=2` line |
+  | `[debug] name 1 -> 2` | Set `gdscript/warnings/name` back to `1` |
+  | `[debug] new section`, and so for each section | Last: delete the header when nothing is left under it. An `enabled=PackedStringArray()` left empty goes with it |
+
+- `seeded`: the starter files. Yours to keep or delete.
+- Then delete the folders this left empty.
+- Not listed: `.venv/`, `.tools/`, `artifacts/`, `__pycache__/` folders under `tools/`, a
+  `.kit-new` file a killed run left, and the `devtools*` and `screenshots` folders in the
+  game's user data ([where that is](platforms.md#where-things-live)). `.godot/` is
+  Godot's own cache, not the kit's.
 
 ## One gate alone
 

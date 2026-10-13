@@ -299,7 +299,7 @@ def _section_keys(text: str, section: str) -> list[str]:
 
 
 def _without_kit_entries(text: str, record: list[str]) -> str:
-    """project.godot with `wrote.project_godot` undone as README "Remove it" says, entry
+    """project.godot with `wrote.project_godot` undone as docs/tools.md says, entry
     by entry. The kit's sections come after [application], whose description holds a line
     that looks like a header: the last match is the section."""
     lines = text.split("\n")
@@ -1873,7 +1873,8 @@ def test_a_kit_json_of_yours_that_does_not_say_strict_gets_a_note(kit: Path, tar
 def test_the_manifest_lists_everything_removing_the_kit_has_to_undo(
     kit: Path, target: Path
 ) -> None:
-    """README "Remove it", followed to the letter after an install and an upgrade: nothing
+    """docs/tools.md, "Removing the kit", followed to the letter after an install and an
+    upgrade: nothing
     of the kit's is left, nothing of the project's is lost."""
     debug = "[debug]\n\ngdscript/warnings/untyped_declaration=1\ngdscript/warnings/unsafe_cast=2\n"
     plugins = '[editor_plugins]\n\nenabled=PackedStringArray("res://addons/mine/plugin.cfg")\n\n'

@@ -43,7 +43,7 @@ Tune each one in play. They are where to begin, not a standard.
 | Beat | Start with |
 |---|---|
 | Hit-stop | 50 to 60 ms on contact, about 120 ms on a critical hit. Freeze the two things involved, not the game, then let them catch up with the rules |
-| Screen shake | Keep a `trauma` from 0 to 1 that decays by about 1.8 a second; shake by `trauma * trauma`. A hit taken adds 0.25, a kill 0.2, a boss slam 0.6. A small offset, at most 0.6 degrees of roll. Never for walking |
+| Screen shake | Keep a `trauma` from 0 to 1 that decays by about 1.8 a second; shake by `trauma * trauma`. A hit taken adds 0.25, a kill 0.2, the heaviest slam 0.6. A small offset, at most 0.6 degrees of roll. Never for walking |
 | Hit flash | White for 60 ms, the damage colour for 100 ms, a short knockback, a squash |
 | Hop or step | Squash to y 0.82 for 40 ms, stretch to 1.12, the arc, land at 0.85, settle through 1.03 |
 | Attack | Lean back 80 ms, strike 60 ms, hit-stop, ease out to rest in 150 ms |

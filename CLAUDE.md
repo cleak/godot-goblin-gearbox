@@ -10,9 +10,9 @@
   after the command: `devtools.py ping --session <name>`.
 - Open a screenshot with Read: it shows the image.
 - `.claude/settings.json` pre-approves `check.ps1`, `doctor.ps1`, the lints, the type check,
-  both test runners, the headless `tools/*.gd` checks and every `tools/devtools.py` command.
+  both test runners, the headless `tools/*.gd` checks and the `tools/devtools.py` commands.
   They run the project's scripts and tests; `-Fix` and `--fix` rewrite `.gd` files and scene
-  uids. Setup, installs, starting the game (with or without `xvfb-run`) and
-  `devtools.py --project <folder>` still ask.
+  uids. Setup, installs, starting the game (with or without `xvfb-run`), `set-state`,
+  `run-method` and `devtools.py --project <folder>` still ask.
 - MCP is optional; the CLI does the same. To turn it on, copy `tools/mcp/.mcp.json.example` to
   `.mcp.json` at the project root, set `GODOT_AGENT_SESSION` in it, and approve the server.
