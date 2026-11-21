@@ -20,6 +20,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
@@ -255,11 +256,43 @@ def icacls(folder: Path, *arguments: str) -> None:
     assert changed.returncode == 0, changed.stdout + changed.stderr
 
 
+@functools.cache
+def _done_where_denied() -> frozenset[str]:
+    """Windows: what this user still does in a folder whose access rule denies it. A
+    process with backup and restore rights enabled (an administrator on a CI runner) lists
+    such a folder and makes folders in it; it still may not write a file there."""
+    probe = Path(tempfile.mkdtemp(prefix="access_probe_"))
+    attempts = {
+        "lists a folder": lambda: os.listdir(probe),
+        "makes a folder": lambda: (probe / "folder").mkdir(),
+        "writes a file": lambda: (probe / "file").write_bytes(b""),
+    }
+    done: set[str] = set()
+    icacls(probe, "/deny", f"{EVERYONE}:(RD,WD,AD)")
+    try:
+        for what, attempt in attempts.items():
+            with contextlib.suppress(PermissionError):
+                attempt()
+                done.add(what)
+    finally:
+        icacls(probe, "/remove:d", EVERYONE)
+        shutil.rmtree(probe)
+    return frozenset(done)
+
+
+def _skip_where_denied_anyway(*needed: str) -> None:
+    """Skip a test whose access rule this user passes: it would test nothing."""
+    passed = sorted(_done_where_denied().intersection(needed))
+    if passed:
+        pytest.skip(f"this user {' and '.join(passed)} where an access rule denies it")
+
+
 @contextlib.contextmanager
 def takes_no_new_file(folder: Path) -> Iterator[None]:
     """Nothing can be created in `folder` meanwhile; what it holds stays writable: an
     access rule on Windows, no write permission elsewhere. Ask not_as_root() first."""
     if WINDOWS:
+        _skip_where_denied_anyway("makes a folder", "writes a file")
         icacls(folder, "/deny", f"{EVERYONE}:(WD,AD)")
         try:
             yield
@@ -278,6 +311,8 @@ def takes_no_new_file(folder: Path) -> Iterator[None]:
 def cannot_be_listed(*folders: Path) -> Iterator[None]:
     """What `folders` hold cannot be listed meanwhile: an access rule on Windows, no
     permission at all elsewhere. Ask not_as_root() first."""
+    if WINDOWS:
+        _skip_where_denied_anyway("lists a folder")
     modes = [stat.S_IMODE(folder.stat().st_mode) for folder in folders]
     for folder in folders:
         if WINDOWS:

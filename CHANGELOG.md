@@ -22,6 +22,10 @@ Fixes and lessons from using the kit since 0.1.0. Godot 4.7.2, gdUnit4 6.2.2, as
   and GDScript loaders alike: a gate no longer stops on it.
 - **Exports.** `tools/godot.ps1` treats `++` like `--`: an `--export-*` after it is the game's
   argument and creates no folder.
+- **The kit's own tests.** A test that takes a permission away is skipped, with the reason,
+  where an access rule does not hold for this Windows user (backup and restore rights, as on
+  GitHub's runners), as it is for root. One no longer depends on the order Linux lists a
+  folder in.
 - **Pages.** `docs/tools.md`: testing `@tool` scripts and editor plugins in a headless editor,
   counting physics frames, gdUnit4's exit codes 103 and 104, the CI step. `docs/devtools.md`:
   a launch flag that skips mouse capture, `--audio-driver Dummy`, interactions that check

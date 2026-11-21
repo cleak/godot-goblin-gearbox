@@ -391,7 +391,7 @@ def test_the_command_follows_no_link_to_its_destination(
             said = capsys.readouterr().err
             assert f"may not be a link or junction: {link}" in said, said
     assert _tree(shared) == before and downloads == []
-    assert [path.name for path in tmp_path.iterdir()] == ["game", "shared"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["game", "shared"]
 
 
 def test_the_command_installs_nothing_where_a_link_points(tmp_path: Path, monkeypatch) -> None:
