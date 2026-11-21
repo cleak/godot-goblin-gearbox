@@ -66,3 +66,20 @@ def test_export_creates_parent_before_engine(tmp_path: Path, output: str) -> Non
         root, "godot.ps1", "--headless", env=env | {"KIT_EXPORT_PARENT": str(root / "nope")}
     )
     assert plain.returncode == 41, plain.stdout + plain.stderr
+
+
+@NEEDS_PWSH
+@pytest.mark.parametrize("separator", ["--", "++"])
+def test_user_arguments_after_a_separator_export_nothing(tmp_path: Path, separator: str) -> None:
+    """Godot ends its own arguments at `--` and at `++`: what follows is the game's."""
+    root = tmp_path / "checkout"
+    copy_tools(root, "godot.ps1", "export_paths.ps1")
+    write_kit_json(root)
+    write(root / "project.godot", project_godot(main_scene="res://main.tscn"))
+    write(root / ".godot" / "global_script_class_cache.cfg", EMPTY_CLASS_CACHE)
+    engine = python_program(tmp_path / "bin", "engine", ENGINE)
+    env = clean_env(GODOT_BIN=str(engine), KIT_EXPORT_PARENT=str(tmp_path))
+    args = ["--headless", separator, "--export-release", PRESET, "out/game.exe"]
+    result = run_tool(root, "godot.ps1", *args, env=env, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (root / "out").exists()

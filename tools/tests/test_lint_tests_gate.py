@@ -240,6 +240,33 @@ def test_errors_exit_2(tmp_path: Path) -> None:
     assert "test/deep/test_hangs.gd:5: 'while true:'" in result.stdout
 
 
+def test_awaiting_ready_after_add_child_is_an_error(tmp_path: Path) -> None:
+    # ready fires inside add_child(): awaiting it afterwards waits for ever.
+    root = _project(tmp_path)
+    write(
+        root / "test" / "test_ready.gd",
+        "extends GdUnitTestSuite\n\n\n"
+        "func test_hangs() -> void:\n"
+        "\tvar node: Node = auto_free(Node.new())\n"
+        "\tadd_child(node)\n"
+        "\tawait node.ready\n"
+        "\tassert_bool(node.is_inside_tree()).is_true()\n\n\n"
+        "func test_waits_before_adding() -> void:\n"
+        "\tvar node: Node = auto_free(Node.new())\n"
+        "\tadd_child.call_deferred(node)\n"
+        "\tawait node.ready\n"
+        "\tassert_bool(node.is_inside_tree()).is_true()\n\n\n"
+        "func test_other_function_added_it() -> void:\n"
+        "\tvar node: Node = auto_free(Node.new())\n"
+        "\tawait node.ready  # add_child(node)\n"
+        "\tassert_bool(node.is_inside_tree()).is_true()\n",
+    )
+    result = run_tool(root, "lint_tests.ps1")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "test/test_ready.gd:7: 'await node.ready' after add_child(node)" in result.stdout
+    assert result.stdout.count("await node.ready") == 1, result.stdout
+
+
 def test_warnings_exit_1(tmp_path: Path) -> None:
     root = _project(tmp_path)
     write(

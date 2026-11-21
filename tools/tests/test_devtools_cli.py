@@ -723,6 +723,21 @@ class ProtocolTests(unittest.TestCase):
                 self.assertEqual(len(err.splitlines()), 1, err)
         self.assertEqual(asked, {"ping": 5.0, "input_clear": 5.0, "quit": 5.0, "performance": 30.0})
 
+    def test_get_state_asks_for_the_properties_it_is_given(self) -> None:
+        reply = {"success": True, "message": "State retrieved", "data": {"hp": 3}}
+        base = ("--project", str(PROJECT_ROOT))
+        with patch.object(devtools, "send_command", return_value=reply) as sent:
+            asked = ("get-state", "-n", "Player", "--properties", "hp, a:x")
+            code, _out, _err = run_main(*base, *asked)
+            self.assertEqual(code, 0)
+            sent.assert_called_once_with(
+                PROJECT_ROOT, "get_state", {"node_path": "Player", "properties": ["hp", "a:x"]}
+            )
+            sent.reset_mock()
+            # Without the option the game lists what it stores, as before.
+            self.assertEqual(run_main(*base, "get-state")[0], 0)
+            sent.assert_called_once_with(PROJECT_ROOT, "get_state", {"node_path": ""})
+
     def test_a_write_that_fails_leaves_no_temporary_file(self) -> None:
         target = self.user_data / "command.json"
         with (
@@ -1304,6 +1319,75 @@ def test_godot_names_its_user_data_folder_as_the_client_does(tmp_path: Path) -> 
         assert folder == devtools.user_data_folder(settings, PLATFORM, env), case
     # Nothing went to the folders the other systems' variables name.
     assert not (tmp_path / "decoy" / GODOT_DIRS[PLATFORM]).exists()
+
+
+PRINT_USER_DIR = """extends SceneTree
+
+
+func _init() -> void:
+\tprint("USER_DIR " + OS.get_user_data_dir())
+\tquit()
+"""
+
+# A setting with a feature suffix replaces the plain one where that feature is on. Every
+# row names the folder on this system; a suffix for another system must change nothing.
+OVERRIDE_CASES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "this system's folder name": (
+        (
+            "config/use_custom_user_dir=true",
+            'config/custom_user_dir_name="Plain"',
+            'config/custom_user_dir_name.<this>="Mine"',
+            'config/custom_user_dir_name.<other>="Theirs"',
+        ),
+        ("Mine",),
+    ),
+    "a custom folder on this system only": (
+        (
+            "config/use_custom_user_dir.<this>=true",
+            'config/custom_user_dir_name="Mine"',
+        ),
+        ("Mine",),
+    ),
+    "a custom folder on another system only": (
+        (
+            "config/use_custom_user_dir.<other>=true",
+            'config/custom_user_dir_name="Theirs"',
+        ),
+        (GODOT_DIR, "Probe"),
+    ),
+}
+
+
+@pytest.mark.real_godot
+@pytest.mark.parametrize("case", OVERRIDE_CASES)
+def test_a_setting_for_this_system_names_the_folder_as_godot_does(
+    tmp_path: Path, case: str
+) -> None:
+    lines, folders = OVERRIDE_CASES[case]
+    other = "linux" if PLATFORM != "linux" else "windows"
+    written = [line.replace("<this>", PLATFORM).replace("<other>", other) for line in lines]
+    project = make_project(tmp_path, 'config/name="Probe"', *written)
+    (project / "probe.gd").write_text(PRINT_USER_DIR, encoding="utf-8", newline="\n")
+    godot = real_godot()
+    if godot is None:
+        pytest.skip("no Godot resolves here: run tools/install_godot.ps1 or set GODOT_BIN")
+    env = clean_env(**user_data_env(tmp_path / "user data"))
+    completed = subprocess.run(
+        [godot, "--headless", "--path", str(project), "--script", "res://probe.gd"],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    lines_out = [line for line in completed.stdout.splitlines() if line.startswith("USER_DIR ")]
+    assert completed.returncode == 0 and len(lines_out) == 1, completed.stdout + completed.stderr
+    godot_says = Path(lines_out[0].removeprefix("USER_DIR "))
+    root = devtools.godot_data_root(PLATFORM, env)
+    assert godot_says == expected_folder(root, PLATFORM, folders)
+    assert devtools.get_user_data_path(project, env=env) == godot_says
 
 
 @linux_only("XDG_DATA_HOME, and what Godot does without a usable one")

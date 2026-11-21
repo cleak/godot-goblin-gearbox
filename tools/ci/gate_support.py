@@ -76,7 +76,9 @@ def entry_files(key: str, config: kit_config.KitConfig, suffix: str = ".gd") -> 
     if key.endswith("/"):
         if not target.is_dir():
             return []
-        return sorted(target.rglob(f"*{suffix}", case_sensitive=False))
+        # is_file(): a link whose target is gone lists like a file but cannot be read.
+        found = target.rglob(f"*{suffix}", case_sensitive=False)
+        return sorted(path for path in found if path.is_file())
     return [target] if target.is_file() else []
 
 

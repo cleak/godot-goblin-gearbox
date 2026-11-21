@@ -114,7 +114,7 @@ A game started with `--headless` needs no display and answers every command but
 | `ping` | One try: which game answers, its pid, session, Godot version, mutation on or off, user data folder, screenshot folder |
 | `screenshot [--filename <name.png>]` | The viewport to the session's screenshot folder. Prints the path and the size. A bare file name only |
 | `scene-tree [--depth <n>]` | The current scene's nodes as JSON (10 levels) |
-| `get-state [--node <path>]` | A node's properties as JSON. No path: the scene root |
+| `get-state [--node <path>] [--properties <a,b>]` | A node's properties as JSON: its script variables and stored properties. No path: the scene root. `--properties` reads exactly those, also values the engine works out (`global_position`) and indexed ones (`position:x`); a name the node lacks fails the command |
 | `performance` | FPS, frame times, draw calls, memory, object, node and orphan counts |
 | `validate --scene res://<scene>.tscn [--strict]` | Loads and instantiates one scene. Warns when the game has logged errors |
 | `validate-all [--strict]` | The same for every authored scene |
@@ -223,6 +223,12 @@ sent empty, and an `Array[YourClass]` parameter not at all.
   code that handles events (`_unhandled_input`) both see it. Code that tests
   `event is InputEventKey` does not: test the action.
 - Every screen needs an action that moves on from it, or a menu stops the sequence.
+- A game that captures the mouse (`Input.MOUSE_MODE_CAPTURED`) takes the owner's pointer
+  while an agent drives it: give it a launch flag of its own that skips the capture, read
+  from `OS.get_cmdline_user_args()`, and start agent runs with it.
+- A run nobody listens to needs no sound: `--audio-driver Dummy` in front of `--user-args`.
+- An automated interaction counts when it checks that it hit what it aimed at (the door it
+  opened is open). A command that sets the state up proves nothing about the player's path.
 
 ## Your own commands
 

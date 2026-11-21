@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.0
+
+Fixes and lessons from using the kit since 0.1.0. Godot 4.7.2, gdUnit4 6.2.2, as before.
+
+- **DevTools.** `get-state --properties a,b` (MCP: `properties`) reads exactly the named
+  properties of a node, values the engine works out (`global_position`) and indexed ones
+  (`position:x`) too; a name the node lacks fails the command. Without it the reply is as
+  before. The client finds the user data folder of a project that names it per system
+  (`config/custom_user_dir_name.windows`, `config/use_custom_user_dir.linux`), as Godot
+  does, checked against a real Godot.
+- **Project lint.** `lint_project.gd` fails an `ext_resource` outside the project (`C:/...`,
+  `/home/...`, `user://`), which loads only on the machine that saved it; it used to read
+  such a path as relative and report a file that does not exist. It also fails an autoload
+  whose script or scene is gone.
+- **Test lint.** `lint_tests.ps1` fails `await x.ready` after `add_child(x)` in the same
+  function: the await never returns. Awaiting before the node is added stays allowed.
+- **CI.** After `check.ps1` the workflow fails when `git status --porcelain` lists anything:
+  a script's `.uid` the import wrote and nobody committed is green on one machine only.
+- **File walks.** A link whose target is gone is no source file, in the Python, PowerShell
+  and GDScript loaders alike: a gate no longer stops on it.
+- **Exports.** `tools/godot.ps1` treats `++` like `--`: an `--export-*` after it is the game's
+  argument and creates no folder.
+- **Pages.** `docs/tools.md`: testing `@tool` scripts and editor plugins in a headless editor,
+  counting physics frames, gdUnit4's exit codes 103 and 104, the CI step. `docs/devtools.md`:
+  a launch flag that skips mouse capture, `--audio-driver Dummy`, interactions that check
+  what they hit. `docs/gotchas.md`: the two new lint messages, and a Jolt setting that falls
+  back to Godot Physics without a word. `docs/critique.md`: scored rounds. `AGENTS.md`: its
+  Reference table sends `@tool` code to `docs/tools.md`.
+
 ## 0.1.0
 
 The first public version. Godot 4.7 (4.7.2 pinned), standard build, GDScript, PowerShell 7,

@@ -127,7 +127,7 @@ func test_unknown_command_is_an_error_reply() -> void:
 	assert_str(str(reply["message"])).is_equal("Unknown command: no_such_command")
 
 
-func test_get_state_lists_script_variables_as_json() -> void:
+func test_get_state_lists_script_variables_as_json_or_the_named_properties() -> void:
 	var reply: Dictionary = await _dev_tools.execute("get_state", {"node_path": _sample_path})
 	var data: Dictionary = reply["data"]
 	assert_bool(reply["success"]).is_true()
@@ -137,8 +137,31 @@ func test_get_state_lists_script_variables_as_json() -> void:
 	assert_that(data["tint"]).is_equal({"r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0})
 	assert_that(data["label"]).is_equal("idle")
 	assert_that(data["position"]).is_equal({"x": 0.0, "y": 0.0})
+	assert_bool(data.has("global_position")).is_false()
 	var missing: Dictionary = await _dev_tools.execute("get_state", {"node_path": "/root/Nope"})
 	assert_str(str(missing["message"])).is_equal("Node not found: /root/Nope")
+	# A value the engine works out, global_position, is not stored: asked for by name, it is
+	# read, and nothing else is.
+	_sample.position = Vector2(4, 5)
+	var args: Dictionary = {
+		"node_path": _sample_path, "properties": ["global_position", "count", "spot:x"]
+	}
+	var named_reply: Dictionary = await _dev_tools.execute("get_state", args)
+	var named: Dictionary = named_reply["data"]
+	assert_bool(named_reply["success"]).is_true()
+	assert_that(named["global_position"]).is_equal({"x": 4.0, "y": 5.0})
+	assert_that(named["count"]).is_equal(3)
+	assert_that(named["spot:x"]).is_equal(1.0)
+	assert_bool(named.has("tint")).is_false()
+	assert_str(str(named["node_path"])).is_equal(_sample_path)
+	args["properties"] = ["count", "no_such_thing"]
+	var unknown: Dictionary = await _dev_tools.execute("get_state", args)
+	assert_bool(unknown["success"]).is_false()
+	assert_str(str(unknown["message"])).contains("no_such_thing")
+	args["properties"] = "count"
+	var not_a_list: Dictionary = await _dev_tools.execute("get_state", args)
+	assert_bool(not_a_list["success"]).is_false()
+	assert_str(str(not_a_list["message"])).is_equal("'properties' must be a list of names")
 
 
 func test_scene_tree_describes_the_current_scene() -> void:

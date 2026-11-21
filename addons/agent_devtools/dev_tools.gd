@@ -497,6 +497,18 @@ func _cmd_get_state(args: Dictionary) -> Dictionary:
 		"node_class": target.get_class(),
 		"node_path": str(target.get_path()),
 	}
+	if args.has("properties"):
+		# Named: exactly these, stored or not (global_position), indexed or not ("position:x").
+		if not args["properties"] is Array:
+			return DevCommand.reply(false, "'properties' must be a list of names")
+		var names: Array = args["properties"]
+		for raw: Variant in names:
+			var property_name: String = str(raw)
+			var value: DevState.Decoded = DevState.read(get_tree(), node_path, property_name)
+			if not value.error.is_empty():
+				return DevCommand.reply(false, value.error)
+			state[property_name] = DevState.to_json(value.value)
+		return DevCommand.reply(true, "State retrieved", state)
 	var shown: int = PROPERTY_USAGE_SCRIPT_VARIABLE | PROPERTY_USAGE_STORAGE
 	for property: Dictionary in target.get_property_list():
 		var usage: int = property["usage"]

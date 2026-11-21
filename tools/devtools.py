@@ -285,12 +285,18 @@ def user_data_folder(settings: Mapping[str, str], platform: str, env: Mapping[st
     `platform` with the environment `env` (godot_data_root lists what is read)."""
     root = godot_data_root(platform, env)
     shared = root / ("godot" if platform == "linux" else "Godot") / "app_userdata"
-    name = safe_dir_name(settings.get("config/name", ""))
+
+    def setting(key: str) -> str:
+        # `key.windows` replaces `key` on Windows, and so on. Only the system's own
+        # feature is read: other feature tags (`editor`, `debug`) are not.
+        return settings.get(f"{key}.{platform}", settings.get(key, ""))
+
+    name = safe_dir_name(setting("config/name"))
     if not name:
         # Godot gives a project without a usable name this folder, custom folder or not.
         return shared / UNNAMED_PROJECT
-    if settings.get("config/use_custom_user_dir") == "true":
-        custom = safe_dir_path(settings.get("config/custom_user_dir_name", "")) or name
+    if setting("config/use_custom_user_dir") == "true":
+        custom = safe_dir_path(setting("config/custom_user_dir_name")) or name
         return root.joinpath(*(part for part in custom.split("/") if part))
     return shared / name
 
@@ -625,8 +631,12 @@ def cmd_performance(args: argparse.Namespace, project_path: Path) -> int:
 
 
 def cmd_get_state(args: argparse.Namespace, project_path: Path) -> int:
-    """Print a node's properties."""
-    result = send_command(project_path, "get_state", {"node_path": args.node or ""})
+    """Print a node's properties: the ones it stores, or exactly those --properties names."""
+    payload: dict[str, object] = {"node_path": args.node or ""}
+    if getattr(args, "properties", None):
+        names = (name.strip() for name in args.properties.split(","))
+        payload["properties"] = [name for name in names if name]
+    result = send_command(project_path, "get_state", payload)
     return finish(result, args, print_data)
 
 
@@ -1033,6 +1043,10 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--depth", "-d", type=int, default=10, help="levels (default 10)")
     command = add("get-state", cmd_get_state, "print a node's properties")
     command.add_argument("--node", "-n", help="node path (default: the scene root)")
+    command.add_argument(
+        "--properties",
+        help='only these, comma-separated; any property, also "global_position" or "position:x"',
+    )
     command = add("set-state", cmd_set_state, "set a node property (needs allow_mutation)")
     command.add_argument("--node", "-n", required=True, help="node path")
     command.add_argument("--property", required=True, help='property, may be "position:x"')

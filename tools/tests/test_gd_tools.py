@@ -414,6 +414,38 @@ def test_lint_project_reports_each_uid_defect_with_its_fix(project: Project) -> 
     assert "Run: pwsh ./tools/godot.ps1 --headless --import" in out
 
 
+def test_lint_project_reports_paths_that_only_this_machine_has(project: Project) -> None:
+    # A file outside the project loads on the machine that saved the scene and nowhere else.
+    project.add_game()
+    outside = project.path("../elsewhere/rock.tres").resolve()
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text('[gd_resource type="Resource" format=3]\n\n[resource]\n', encoding="utf-8")
+    project.write(
+        "scenes/outside.tscn",
+        '[gd_scene load_steps=3 format=3 uid="uid://boutsideref1"]\n\n'
+        f'[ext_resource type="Resource" path="{outside.as_posix()}" id="1"]\n'
+        '[ext_resource type="Resource" path="user://saved.tres" id="2"]\n\n'
+        '[node name="A" type="Node"]\n',
+    )
+    # An autoload whose script is gone fails every run of the game, and nothing else says so.
+    settings = PROJECT_GODOT.replace(
+        'Game="*res://scripts/game.gd"',
+        'Game="*res://scripts/game.gd"\nGone="*res://scripts/gone.gd"',
+    )
+    project.write("project.godot", settings)
+
+    code, out = project.tool("lint_project", "--uids-only")
+    assert code == 1, out
+    for expected in (
+        f"res://scenes/outside.tscn:3: ext_resource {outside.as_posix()} is outside the project.",
+        "res://scenes/outside.tscn:4: ext_resource user://saved.tres is outside the project.",
+        "Fix: move the file into the project and point path at its res:// path.",
+        "res://project.godot: autoload Gone names res://scripts/gone.gd, which does not exist.",
+        "LINT_PROJECT_FAILED errors=3 warnings=0",
+    ):
+        assert expected in out, f"missing: {expected}\n{out}"
+
+
 def _png(width: int = 1, height: int = 1) -> bytes:
     """A valid white RGB PNG."""
 

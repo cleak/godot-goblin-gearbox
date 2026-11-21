@@ -103,6 +103,11 @@ the verdict:
 PowerShell that aborts as it starts runs nothing and can exit 0
 ([gotchas.md](gotchas.md), "Linux").
 
+The CI workflow (`.github/workflows/ci.yml`) runs `setup.ps1`, then `check.ps1`, and then
+fails when `git status --porcelain` lists anything: a check without `-Fix` writes nothing git
+tracks, so a changed file or a new one that is not ignored (a script's `.uid` the import wrote
+and nobody committed) would be green on your machine and broken in every fresh clone.
+
 Cost on the sample game: about three and a half minutes for a full run. Windows, 32
 threads: 210 to 230 s. Linux, 16 cores: about 220 s. A machine busy with other work took
 four to seven minutes. All but 13 to 21 s of it is `pytest` on four workers. `-Changed` leaves `pytest`
@@ -331,8 +336,9 @@ needs that rule and an entry in `source.include`.
 **lint_tests.ps1** asks `tools/ci/suites.py`, the rule the runner uses, which scripts are
 suites: a script that reaches `GdUnitTestSuite` through what it extends, whatever its file
 name. Errors: a script under `tests.root` with `test_` functions that extends no suite,
-`while true:` in a suite, and a suite with tests outside `tests.root` that no suite under it
-extends: no runner would start it
+`while true:` in a suite, `await x.ready` after `add_child(x)` in the same function (ready
+fired inside `add_child()`, so the await never returns: await a frame), and a suite with
+tests outside `tests.root` that no suite under it extends: no runner would start it
 (`... never runs: move it there, or set tests.root in kit.json`). Warnings: no `test_`
 function, a test without `assert_*(`, `verify*(` or `fail(`. Name a shared helper
 `assert_<something>` so it counts. `check.ps1` fails the gate on warnings too.
@@ -384,8 +390,10 @@ nothing, an `OK` line included.
 | `validate_all.gd` | none | `VALIDATE_ALL_OK loaded=<n>` or `VALIDATE_ALL_FAILED failures=<n> loaded=<n>` |
 
 **lint_project.gd**, uid errors, one line each with the fix: a scene or resource header
-without a uid, an `ext_resource` with a missing or wrong uid or a missing file, a script or
-shader without its `.uid` file, an orphan `.uid`, two files with one uid. Under them it
+without a uid, an `ext_resource` with a missing or wrong uid or a missing file, an
+`ext_resource` outside the project (`C:/...`, `/home/...`, `user://`: it loads only on the
+machine that saved it), an autoload whose file is gone, a script or shader without its
+`.uid` file, an orphan `.uid`, two files with one uid. Under them it
 prints the whole `--fix` command. `--fix` writes header uids, `ext_resource` uids and the new
 path of a moved file; every other byte is kept. It does not write the `.uid` of a new script
 or shader: `pwsh ./tools/godot.ps1 --headless --import` does.
@@ -430,8 +438,9 @@ inside the project`, exit 1). Missing: `path does not exist: <path>`, exit 2.
 
 Both fail when a suite did not parse and when the suites they ran held no test case. gdUnit4
 by itself exits 105 on a suite that does not parse and 0 when it found no test case: do not
-call it directly. A test never sees your game's saves: `user://` is a temp folder, removed
-afterwards. The runner moves it for the Godot it starts alone, with `APPDATA` on Windows,
+call it directly. Its other codes: 100 a failure, 101 only orphan nodes (a pass), 103 run
+headless without `--ignoreHeadlessMode`, 104 a Godot version it does not support.
+A test never sees your game's saves: `user://` is a temp folder, removed afterwards. The runner moves it for the Godot it starts alone, with `APPDATA` on Windows,
 `XDG_DATA_HOME` on Linux, `HOME` on macOS. A diff that selects no suite is another matter:
 `test_shards.py` prints `No suites to run` and exits 0, and `check.ps1 -Changed` lists
 `tests` as `skipped`.
@@ -451,6 +460,23 @@ SIGHUP (129) or SIGQUIT (131), kills the shards, frees the slots and removes the
 folder and `artifacts/gdunit-shards/run_<pid>`. Ctrl+C ends with one line, `Stopped by
 Ctrl+C.`, and no traceback. A signal during that cleanup is ignored. Killed outright, it
 removes no folder; its Godot processes end with it and its slots are free at once.
+
+A test that counts frames counts `physics_frame`s, never process frames: how many physics
+ticks fall in one rendered frame depends on the machine. Better, drive the rule with a tick
+count (`AGENTS.md` Architecture). Physics code that depends on the tick rate: test it at 30,
+60 and 120 Hz (`Engine.physics_ticks_per_second`).
+
+Code that runs in the editor (`@tool` scripts, an `EditorPlugin`) is not proved by a game
+run, and the `scenes` gate does not run it. Prove it in a real headless editor: the plugin
+or `@tool` node reads a flag of its own after `--user-args`, runs its check deferred, prints
+`<NAME>_DONE checked=<n> failures=<n>` and quits with 0 or 1.
+
+```sh
+pwsh ./tools/godot.ps1 --headless --editor res://<scene>.tscn --user-args --check-<name>
+```
+
+A `@tool` script does the same on every load: it writes files only on an explicit save or
+bake action.
 
 A failed string compare prints gdUnit4's character diff, not the value: `but was
 'LPampus 0/3   Moves 1/1d'` for an actual `Paused`. Assert a shorter fact beside the string.

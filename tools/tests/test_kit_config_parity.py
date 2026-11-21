@@ -11,6 +11,7 @@ project folder as an argument for exactly this).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import subprocess
@@ -453,6 +454,10 @@ def projects(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     _link_folder(linked / "alias", linked / "game")
     _link_folder(linked / "src" / "loop", linked)
     built["directory links"] = linked
+    # A file link whose target is gone lists like a script but cannot be read. No right to
+    # make a file link here: the tests that need it skip.
+    with contextlib.suppress(OSError):
+        (linked / "src" / "gone.gd").symlink_to(base / "deleted.gd")
     for name, paths in NAMED.items():
         (built[name] / "named_paths.txt").write_text("\n".join(paths) + "\n", encoding="utf-8")
     (base / "outside.gd").write_bytes(b"")
@@ -656,6 +661,30 @@ def test_directory_links_are_followed_by_no_loader(
     assert "src/a.gd" in mine["gd"] and "game/play.gd" in mine["gd"]
     assert _files(powershell_records["directory links"]) == mine
     assert _files(godot_records["directory links"]) == mine
+
+
+def _without_dangling_link(projects: dict[str, Path], record: dict) -> None:
+    if not (projects["directory links"] / "src" / "gone.gd").is_symlink():
+        pytest.skip("cannot create a file link here")
+    listed = _files(record)["gd"]
+    assert "src/gone.gd" not in listed
+    assert "src/a.gd" in listed
+
+
+def test_a_dangling_file_link_is_not_listed_by_python(projects: dict[str, Path]) -> None:
+    _without_dangling_link(projects, _python_record(projects["directory links"]))
+
+
+def test_a_dangling_file_link_is_not_listed_by_powershell(
+    projects: dict[str, Path], powershell_records: dict[str, dict]
+) -> None:
+    _without_dangling_link(projects, powershell_records["directory links"])
+
+
+def test_a_dangling_file_link_is_not_listed_by_gdscript(
+    projects: dict[str, Path], godot_records: dict[str, dict]
+) -> None:
+    _without_dangling_link(projects, godot_records["directory links"])
 
 
 def _named(

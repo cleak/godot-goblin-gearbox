@@ -79,6 +79,21 @@ playtest by people.
 4. The next round opens with a table of the last round's findings: fixed, partial or
    regressed, each with evidence. A fix that went too far shows up here.
 
+## Scored rounds
+
+When a round must give a grade that can be compared with the last one:
+
+- Each critic picks a level for each item of a written rubric, from levels with an example
+  for each. A script adds the levels up into the score. No model writes the final number.
+- Critics grade blind: none sees another's report before its own is written.
+- A verifier, also read-only, tries to refute the worst findings (critical and high) before
+  they count. A finding it refutes is dropped, with the reason.
+- Pin what is graded: the commit, and the commit it is compared with. A critic reads another
+  commit with `git show <sha>:<path>`, never by switching the checkout others work in.
+- Where agents build the game, a step an agent does from written instructions is a mechanism
+  like a script: it is no finding that it is prose. A finding names how an agent that follows
+  the instructions gets a wrong result.
+
 ## A brief
 
 ```text

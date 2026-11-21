@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import devtools  # noqa: E402 - tools/ is put on the path just above
 
 SERVER_NAME = "godot-devtools"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 INVALID_PARAMS = -32602
 METHOD_NOT_FOUND = -32601
@@ -101,8 +101,15 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         "get_state",
-        "A node's script variables and stored properties as JSON.",
-        {"node_path": NODE},
+        "A node's script variables and stored properties as JSON, or exactly the named ones.",
+        {
+            "node_path": NODE,
+            "properties": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": 'Only these; any property, also "global_position" or "position:x"',
+            },
+        },
         action="get_state",
     ),
     Tool(

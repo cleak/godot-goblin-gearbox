@@ -14,6 +14,9 @@ TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
 import kit_config  # noqa: E402
 
+sys.path.insert(0, str(TOOLS / "ci"))
+import gate_support  # noqa: E402
+
 SHA512 = re.compile(r"[0-9a-f]{128}")
 
 
@@ -434,6 +437,17 @@ def test_directory_links_are_not_followed(tmp_path: Path) -> None:
     # A link back to an ancestor would never end if it were followed.
     assert _link_folder(config.root / "src" / "loop", config.root)
     assert _found(config) == ["src/a.gd"]
+
+
+def test_a_dangling_file_link_is_not_a_source_file(tmp_path: Path) -> None:
+    # A gate that reads every listed file would stop on FileNotFoundError.
+    config = _project(tmp_path / "project", ["src/a.gd"])
+    try:
+        (config.root / "src" / "gone.gd").symlink_to(tmp_path / "deleted.gd")
+    except OSError:
+        pytest.skip("cannot create a file link here")
+    assert _found(config) == ["src/a.gd"]
+    assert gate_support.entry_files("src/", config) == [config.root / "src" / "a.gd"]
 
 
 def test_to_res(tmp_path: Path) -> None:

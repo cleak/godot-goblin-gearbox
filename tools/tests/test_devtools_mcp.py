@@ -119,6 +119,14 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(result["structuredContent"], reply)
         self.assertEqual(json.loads(result["content"][0]["text"]), reply)
 
+    def test_get_state_passes_the_properties_it_is_asked_for(self) -> None:
+        reply = {"success": True, "message": "State retrieved", "data": {}}
+        arguments = {"node_path": "Player", "properties": ["global_position", "hp"]}
+        with patch.object(devtools, "send_command", return_value=reply) as send:
+            result = call("get_state", arguments)
+        send.assert_called_once_with(ROOT, "get_state", arguments, timeout=30.0)
+        self.assertFalse(result["isError"])
+
     def test_validation_takes_strict_and_engine_errors_reach_the_model(self) -> None:
         reply = {"success": True, "message": "Scenes valid", "data": {}, "errors": ["boom (a:1)"]}
         with patch.object(devtools, "send_command", return_value=reply) as send:

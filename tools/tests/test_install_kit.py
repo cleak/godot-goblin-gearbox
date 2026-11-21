@@ -2245,33 +2245,67 @@ def test_a_ci_step_passes_on_the_last_line_of_its_script_alone(
     bash = _git_bash()
     if bash is None:
         pytest.skip("needs bash (on Windows: Git for Windows)")
-    steps = _ci_steps()
-    assert sorted(steps) == ["check", "setup"]
-    stand_in = tmp_path / "bin" / "pwsh"
-    stand_in.parent.mkdir()
     for name, good in (("setup", "ready"), ("check", "PASSED")):
         lines = said.format(name=name, good=good).splitlines()
-        echoes = "".join(f"printf '%s\\n' '{line}'\n" for line in lines)
-        stand_in.write_text(f"#!/bin/sh\n{echoes}exit {code}\n", encoding="ascii", newline="\n")
-        stand_in.chmod(0o755)
-        step = tmp_path / f"{name}.sh"
-        step.write_text(steps[name], encoding="ascii", newline="\n")
-        env = clean_env(RUNNER_TEMP=str(tmp_path))
-        env["PATH"] = str(stand_in.parent) + os.pathsep + env["PATH"]
-        ran = subprocess.run(
-            [bash, "--noprofile", "--norc", "-eo", "pipefail", str(step)],
-            cwd=tmp_path,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
+        ran = _run_ci_step(bash, tmp_path, name, lines, code)
         assert (ran.returncode == 0) == passes, (
             f"{name}: {ran.returncode}\n{ran.stdout}{ran.stderr}"
         )
         if not passes and code == 0:
             assert f"::error::{name}.ps1 did not end with '{name}: {good}'" in ran.stdout
+
+
+def _run_ci_step(
+    bash: str, tmp_path: Path, name: str, lines: list[str], code: int, leaves: str = ""
+) -> subprocess.CompletedProcess[str]:
+    """The bash text of one CI step, run in a clean git checkout with a stand-in `pwsh`
+    that prints `lines`, writes the file `leaves` (when given) and exits `code`."""
+    steps = _ci_steps()
+    assert sorted(steps) == ["check", "setup"]
+    checkout = tmp_path / "checkout"
+    if not checkout.is_dir():
+        checkout.mkdir()
+        _write(checkout / "kit.json", "{}\n")
+        identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        for command in (["init", "-q"], ["add", "."], [*identity, "commit", "-qm", "base"]):
+            subprocess.run(["git", *command], cwd=checkout, check=True, capture_output=True)
+    stand_in = tmp_path / "bin" / "pwsh"
+    stand_in.parent.mkdir(exist_ok=True)
+    echoes = "".join(f"printf '%s\\n' '{line}'\n" for line in lines)
+    writes = f"printf 'uid://x\\n' > '{leaves}'\n" if leaves else ""
+    stand_in.write_text(f"#!/bin/sh\n{echoes}{writes}exit {code}\n", encoding="ascii", newline="\n")
+    stand_in.chmod(0o755)
+    step = tmp_path / f"{name}.sh"
+    step.write_text(steps[name], encoding="ascii", newline="\n")
+    env = clean_env(RUNNER_TEMP=str(tmp_path))
+    env["PATH"] = str(stand_in.parent) + os.pathsep + env["PATH"]
+    return subprocess.run(
+        [bash, "--noprofile", "--norc", "-eo", "pipefail", str(step)],
+        cwd=checkout,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def test_the_check_step_fails_when_the_check_left_a_file_git_does_not_have(
+    tmp_path: Path,
+) -> None:
+    # The import writes a .uid for a script whose .uid was never committed: green on the
+    # machine that has it, a missing uid on every other.
+    bash = _git_bash()
+    if bash is None:
+        pytest.skip("needs bash (on Windows: Git for Windows)")
+    passed = ["check: PASSED: 14 passed, 0 failed, 1 skipped in 9.9s"]
+    ran = _run_ci_step(bash, tmp_path, "check", passed, 0, leaves="player.gd.uid")
+    assert ran.returncode != 0, ran.stdout + ran.stderr
+    assert "?? player.gd.uid" in ran.stdout
+    assert "::error::the check left files git does not have" in ran.stdout
+    (tmp_path / "checkout" / "player.gd.uid").unlink()
+    clean = _run_ci_step(bash, tmp_path, "check", passed, 0)
+    assert clean.returncode == 0, clean.stdout + clean.stderr
 
 
 @pytest.mark.real_godot

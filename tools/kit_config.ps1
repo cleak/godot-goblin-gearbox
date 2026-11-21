@@ -665,10 +665,32 @@ function Get-KitFilesUnder {
             }
         }
         foreach ($file in $directory.EnumerateFiles()) {
-            if ($Extensions -contains $file.Extension.ToLowerInvariant()) { $found.Add($file) }
+            if ($Extensions -notcontains $file.Extension.ToLowerInvariant()) { continue }
+            if (-not (Test-KitReadableFile -File $file)) { continue }
+            $found.Add($file)
         }
     }
     return $found
+}
+
+function Test-KitReadableFile {
+    # A link whose target is gone lists like a file, and .NET says it exists, but it
+    # cannot be read. Only a link is opened to find out: LinkTarget needs .NET 6, and
+    # PowerShell 7.0 runs on .NET Core 3.1.
+    param([Parameter(Mandatory = $true)][System.IO.FileInfo]$File)
+    if (-not ($File.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $true }
+    try {
+        $stream = [System.IO.File]::Open(
+            $File.FullName,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+        )
+        $stream.Dispose()
+        return $true
+    } catch {
+        return $false
+    }
 }
 
 function Get-KitSourceFiles {

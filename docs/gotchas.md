@@ -68,6 +68,9 @@ No gate reports these unless the row says so.
 | `class cache is stale` from `doctor.ps1`, or a new `class_name` is not found | A script with `class_name` was added, moved or pulled since the last import | `pwsh ./tools/godot.ps1 --headless --import`. `tools/godot.ps1` does it by itself before any run; it also writes the new `.uid` files | `kit` |
 | `--headless --import` exits 0, the scripts are broken | Import registers files. It does not compile them: three scripts with a parse error, exit 0, no error line | The proof is `typecheck.ps1`, the tests and a launch | `4.7.2` |
 | Lines vanish from `project.godot` | `ProjectSettings.save()` and an editor save write only keys that differ from the engine default: `gdscript/warnings/inferred_declaration=0` and `unused_parameter=1` went, every `=2` line stayed. Behaviour is unchanged | `git diff project.godot`; keep what you did not mean out of the commit. Edit one key as text | `4.7.2` |
+| `ext_resource C:/... is outside the project` from `lint_project.gd` | The scene names a file by an absolute or `user://` path: it loads on the machine that saved it, nowhere else | Move the file into the project; point `path` at its `res://` path | `kit` |
+| `autoload <Name> names res://..., which does not exist` from `lint_project.gd` | A script or scene an autoload names was moved or deleted. Every run logs `Failed to instantiate an autoload` and goes on without it | Restore it, or fix or remove the autoload (Project Settings > Globals) | `kit`, `4.7.2` |
+| 3D bodies move as Godot Physics, not Jolt | `physics/3d/physics_engine="JoltPhysics3D"`: a value that is not an option falls back to Godot Physics and logs nothing | `"Jolt Physics"`, as the editor writes it. A test can assert the setting | `4.7.2` |
 | A settings file reads back as defaults | A UTF-8 byte order mark. `ConfigFile.load` returns `OK` and drops the first section, nothing else. Windows PowerShell 5.1 `Set-Content -Encoding utf8` writes one | Write without a mark: PowerShell 7, or your editing tool | `4.7.2` |
 
 ## Tests
@@ -80,6 +83,7 @@ No gate reports these unless the row says so.
 | `a gdUnit4 suite outside tests.root 'test' never runs` from `lint_tests.ps1` | The runners start gdUnit4 on `tests.root` alone | Move the suite there, or set `tests.root` in `kit.json` | `kit` |
 | A simulated press never reaches `_input()` | `Input.action_press()` sets the action's state. It sends no event: polling sees it, event handlers do not | Send an `InputEventAction` through `Input.parse_input_event()`: both see it | `4.7.2` |
 | `wall-clock wait: await await_millis(50)` | A test waits on the clock. Also flagged: `OS.delay_msec`, `Time.get_ticks_msec`, `create_timer` | Wait for a signal, a flag, or a number of frames. A real exception: `# wallclock-ok: <reason>` on the line | `kit` |
+| `'await node.ready' after add_child(node) waits for ever` from `lint_tests.ps1` | The row `await node.ready never returns` above, found before the test hangs | `await get_tree().process_frame` | `kit` |
 | `test 'test_hollow' has no assertion` | `lint_tests.ps1` counts `assert_*(`, `verify*(` and `fail(` | Assert. Name a shared helper `assert_<something>` | `kit` |
 
 ## DevTools

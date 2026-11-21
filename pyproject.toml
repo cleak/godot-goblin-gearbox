@@ -1,6 +1,6 @@
 [project]
 name = "godot-goblin-gearbox-tools"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python tooling for a Godot GDScript project: DevTools CLI, test shards, checks, visual diff"
 requires-python = ">=3.12"
 # The tools themselves need only the standard library.

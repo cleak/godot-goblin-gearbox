@@ -389,6 +389,14 @@ static func _folders(
 	return folders
 
 
+## A link whose target is gone lists like a file, and on Windows file_exists() sees the
+## link itself, but it cannot be read. Only a link is opened to find out.
+static func _readable(directory: DirAccess, path: String) -> bool:
+	if not directory.is_link(path):
+		return true
+	return FileAccess.open(path, FileAccess.READ) != null
+
+
 static func _walk(
 	base: String,
 	directory_path: String,
@@ -408,7 +416,7 @@ static func _walk(
 			# A link is not followed: one that points at an ancestor never ends.
 			if not directory.is_link(child) and not is_skipped_dir(child, exclude, base):
 				_walk(base, child, extensions, exclude, found)
-		elif extensions.has(entry.get_extension().to_lower()):
+		elif extensions.has(entry.get_extension().to_lower()) and _readable(directory, child):
 			found[child] = true
 		entry = directory.get_next()
 	directory.list_dir_end()

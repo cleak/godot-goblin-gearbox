@@ -9,7 +9,8 @@ function Initialize-GodotExportDirectory {
     param([string]$ProjectRoot, [string[]]$GodotArgs)
 
     for ($exportIndex = 0; $exportIndex -lt $GodotArgs.Count; $exportIndex++) {
-        if ($GodotArgs[$exportIndex] -ceq "--") { break }
+        # Godot's own arguments end at `--` or `++`: the rest are the game's.
+        if ($GodotArgs[$exportIndex] -ceq "--" -or $GodotArgs[$exportIndex] -ceq "++") { break }
         if ($GodotArgs[$exportIndex] -cnotin @("--export-release", "--export-debug", "--export-pack")) {
             continue
         }

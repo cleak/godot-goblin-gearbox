@@ -8,7 +8,9 @@ extends "res://tools/headless_tool.gd"
 ##
 ## UID checks (errors) cover every authored .tscn/.tres, script and shader:
 ##   - a scene or resource header carries a valid uid
-##   - each [ext_resource] names a file that exists, and carries that file's uid
+##   - each [ext_resource] names a file in the project that exists, and carries
+##     that file's uid (a "C:/..." or "user://" path loads on one machine only)
+##   - each [autoload] in project.godot names a file that exists
 ##   - each .gd/.gdshader/.gdshaderinc has a .uid sidecar holding a valid uid
 ##   - no .uid sidecar outlives its source file
 ##   - no two files share a uid (a copied scene keeps the original's)
@@ -168,6 +170,7 @@ func _main(args: PackedStringArray) -> Verdict:
 		if options.fix:
 			_fix_uids(text_resources, sidecar_sources)
 		_check_uids(text_resources, sidecar_sources)
+		_check_autoloads()
 	if not options.uids_only:
 		for scene_path: String in scenes:
 			_check_scene(scene_path)
@@ -419,6 +422,42 @@ func _claim_uid(uid: String, path: String, line: int, report: bool) -> void:
 	_uid_error(path, line, "shares %s with %s." % [uid, _path_by_uid[uid]], fix)
 
 
+## Every [autoload] of project.godot names a script or scene that exists: a missing one
+## fails each run of the game with an engine error, and no gate reads that.
+func _check_autoloads() -> void:
+	for property: Dictionary in ProjectSettings.get_property_list():
+		var setting: String = property["name"]
+		if not setting.begins_with("autoload/"):
+			continue
+		var target: String = str(ProjectSettings.get_setting(setting)).trim_prefix("*")
+		var path: String = target
+		if target.begins_with("uid://"):
+			path = _path_of_uid(_canonical_uid(target))
+		if not path.is_empty() and FileAccess.file_exists(path):
+			continue
+		var autoload: String = setting.trim_prefix("autoload/")
+		_uid_error(
+			"res://project.godot",
+			0,
+			"autoload %s names %s, which does not exist." % [autoload, target],
+			"restore the file, or remove the autoload (Project Settings > Globals).",
+		)
+
+
+## {"problem", "fix"} for an ext_resource path that names no file of the project in any
+## form: none at all, or one outside it. {} for any other.
+func _unusable_path(ref_path: String) -> Dictionary:
+	if ref_path.is_empty():
+		return {"problem": "ext_resource has no path.", "fix": 'add path="res://...".'}
+	# "C:/...", "/home/...", "user://": it loads on the machine that saved it, nowhere else.
+	if ref_path.is_absolute_path() and not ref_path.begins_with("res://"):
+		return {
+			"problem": "ext_resource %s is outside the project." % ref_path,
+			"fix": "move the file into the project and point path at its res:// path.",
+		}
+	return {}
+
+
 ## What is wrong with one [ext_resource] line of the file `from_path`: {} when
 ## nothing is, else {"problem", "fix"} plus, when the repair is known, the
 ## "uid" or "path" the line should carry.
@@ -426,8 +465,9 @@ func _diagnose_ext_resource(from_path: String, line: String) -> Dictionary:
 	var ref_path: String = _attribute(line, "path")
 	var written_uid: String = _attribute(line, "uid")
 	var ref_uid: String = _canonical_uid(written_uid)
-	if ref_path.is_empty():
-		return {"problem": "ext_resource has no path.", "fix": 'add path="res://...".'}
+	var unusable: Dictionary = _unusable_path(ref_path)
+	if not unusable.is_empty():
+		return unusable
 	if not ref_path.contains("://"):
 		# Godot reads a relative path against the folder of the referring file.
 		ref_path = from_path.get_base_dir().path_join(ref_path).simplify_path()

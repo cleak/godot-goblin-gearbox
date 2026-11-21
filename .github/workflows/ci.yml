@@ -22,6 +22,8 @@ defaults:
 # Each is started from bash and passes on its own last line (setup: ready, check: PASSED),
 # not on exit 0 alone: a PowerShell that aborts as it starts runs nothing and exits 0
 # (docs/gotchas.md, "Linux"). On Windows that bash is the one Git for Windows brings.
+# The check then must leave the checkout as git has it: a file it changed or made that is
+# not ignored (a script's .uid nobody committed) passes on a developer's machine only.
 # Actions are pinned by commit: a tag can be moved, a commit cannot. The comment names
 # the release; to update, take the commit of the new tag (git ls-remote <repository>).
 #
@@ -88,6 +90,11 @@ jobs:
             "check: PASSED"*) ;;
             *) echo "::error::check.ps1 did not end with 'check: PASSED': it did not run to its end"; exit 1 ;;
           esac
+          changed="$(git status --porcelain)"
+          if [ -n "$changed" ]; then
+            printf '%s\n' "$changed"
+            echo "::error::the check left files git does not have: commit them (a .uid the import wrote) or ignore them"; exit 1
+          fi
 
       # Also for a job that ran out of time: a cancelled job is no failure().
       - name: Upload gate logs and test reports

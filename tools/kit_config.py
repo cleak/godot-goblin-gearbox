@@ -275,7 +275,8 @@ def _walk(
             if entry.is_dir():
                 if not is_skipped_dir(entry, config, use_exclude=use_exclude):
                     pending.append(entry)
-            elif entry.suffix.lower() in suffixes:
+            # is_file(): a link whose target is gone lists like a file but cannot be read.
+            elif entry.suffix.lower() in suffixes and entry.is_file():
                 yield entry
 
 

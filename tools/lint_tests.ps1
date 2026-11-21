@@ -13,6 +13,8 @@
 #   - a script with test_ functions that extends no suite (the runner fails on
 #     it too)
 #   - `while true:` in a suite (a test must not be able to hang the run)
+#   - `await x.ready` after `add_child(x)` in the same function: ready fired
+#     inside add_child(), so the await never returns
 #   - a gdUnit4 suite outside the test root that no suite under it extends: no
 #     runner would ever run it
 # Warnings:
@@ -206,9 +208,21 @@ foreach ($suite in $suites) {
     $text = [System.IO.File]::ReadAllText((Join-Path $projectRoot $relative)).Replace("`r`n", "`n")
     $lines = @((ConvertTo-CodeOnly $text) -split "`n")
 
+    # Nodes this function has added so far: their ready has already fired.
+    $added = New-Object System.Collections.Generic.HashSet[string]
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '\bwhile\s*\(?\s*true\s*\)?\s*:') {
+        $line = $lines[$i]
+        if ($line -match '^\s*(?:static\s+)?func\s') { $added.Clear() }
+        if ($line -match '\bwhile\s*\(?\s*true\s*\)?\s*:') {
             Add-Error $relative ($i + 1) "'while true:' can hang the run; bound the loop"
+        }
+        if ($line -match '\bawait\s+([A-Za-z_][\w.]*)\s*\.\s*ready\b' -and $added.Contains($Matches[1])) {
+            $name = $Matches[1]
+            Add-Error $relative ($i + 1) ("'await $name.ready' after add_child($name) waits for ever: " +
+                "ready fired inside add_child(); await get_tree().process_frame")
+        }
+        foreach ($call in [regex]::Matches($line, '(?<![\w.])add_child\s*\(\s*([A-Za-z_][\w.]*)\s*[,)]')) {
+            [void]$added.Add($call.Groups[1].Value)
         }
     }
 

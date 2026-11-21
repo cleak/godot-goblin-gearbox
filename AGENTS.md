@@ -151,7 +151,7 @@ uv run python tools/devtools.py quit             # always
 
 | When | Open |
 |---|---|
-| One gate alone, flags, exit codes; `kit.json`; a new input action | `docs/tools.md` |
+| One gate alone, flags, exit codes; `kit.json`; an input action; `@tool` code | `docs/tools.md` |
 | Driving the game: commands, sequence steps, your own command, no answer | `docs/devtools.md` |
 | A message you do not recognise; scenes and uids; shells | `docs/gotchas.md` |
 | Linux, macOS: what differs, what was never run, stopping a game | `docs/platforms.md` |
