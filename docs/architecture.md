@@ -23,6 +23,10 @@ In the sample game (these files go when it goes):
   `test/unit/test_game.gd` drives the scene through input actions, as a player does.
 - `test/sequences/smoke.json` asserts those properties in the running game.
 
+The 3D showcase, Lanternworks, has the same layers in two modules of its own:
+`showcase_core` (`showcase/core/isle.gd`, pure) and `showcase_game` (`showcase/game/`, which
+may name `showcase_core` only). Its suites are in `test/showcase/`.
+
 ## Why each line
 
 The `Architecture (default)` lines of `AGENTS.md`, each with what it buys.

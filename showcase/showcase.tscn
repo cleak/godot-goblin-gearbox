@@ -1,0 +1,10 @@
+[gd_scene format=3 uid="uid://vfv0p7cscwon"]
+
+[ext_resource type="Script" uid="uid://cob0t4kmub66e" path="res://showcase/game/lanternworks.gd" id="1_game"]
+[ext_resource type="Script" uid="uid://1a8gxlwd4v44" path="res://showcase/game/showcase_dev_commands.gd" id="2_dev"]
+
+[node name="Showcase" type="Node3D"]
+script = ExtResource("1_game")
+
+[node name="DevCommands" type="Node" parent="."]
+script = ExtResource("2_dev")

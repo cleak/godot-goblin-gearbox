@@ -6,6 +6,22 @@ everything, and a way for the agent to drive the running game and look at it.
 GDScript. Windows and Linux. PowerShell 7, Python 3.12 through uv. MIT. Start a game from
 it, or install it into one you have.
 
+![Lanternworks, the 3D showcase: the gearbox wakes under the aurora](docs/images/showcase.png)
+
+**Lanternworks**, the showcase: a goblin tinker lights four lanterns on a floating island
+while the sun goes down, and the last one wakes the gearbox under the aurora. No HUD: the
+gearbox's bulbs and gauge keep count. An agent built it with the kit and plays it through
+`test/sequences/showcase.json`, asserting state and taking a screenshot at each beat. All of
+it is code: physically based materials from generated noise maps, eleven shaders, bounce
+light, synthesised sound, no imported assets.
+```sh
+pwsh ./tools/godot.ps1 res://showcase/showcase.tscn
+```
+
+![Lanternworks in play at golden hour: three lanterns lit, the gearbox charging](docs/images/showcase_play.png)
+
+The kit's own sample game is smaller: light three lamps on a 2D grid.
+
 ![The sample game after the sequence: one lamp lit, the player on it](docs/images/smoke.png)
 
 ```sh
@@ -20,23 +36,23 @@ with its asserts and take the picture above. The first:
 ```text
 Gate           Result   Seconds  Detail
 ----           ------   -------  ------
-ascii          pass         0.6  ASCII guard: CLEAN (16 PowerShell script(s))
-gdlint         pass         2.7  GDScript lint + format: CLEAN
-typecheck      pass         5.0  Type-check: CLEAN (22 of 22 files)
-project-lint   pass         0.4  LINT_PROJECT_OK errors=0 warnings=0
-shader-lint    skipped        -  no .gdshader files
-validate-all   pass         0.8  VALIDATE_ALL_OK loaded=21
-scenes         pass         0.3  DevTools: Scenes valid: 1 checked, 0 errors, 0 warnings
-test-lint      pass         0.6  Test lint: CLEAN (2 file(s))
+ascii          pass         0.5  ASCII guard: CLEAN (16 PowerShell script(s))
+gdlint         pass         3.2  GDScript lint + format: CLEAN
+typecheck      pass         4.9  Type-check: CLEAN (40 of 40 files)
+project-lint   pass         0.7  LINT_PROJECT_OK errors=0 warnings=0
+shader-lint    pass         0.6  LINT_SHADERS_OK checked=11
+validate-all   pass         1.4  VALIDATE_ALL_OK loaded=40
+scenes         pass         0.5  DevTools: Scenes valid: 2 checked, 0 errors, 0 warnings
+test-lint      pass         0.7  Test lint: CLEAN (5 file(s))
 ruff           pass         0.1  All checks passed!
 pytest         skipped        -  tools/tests not present
-architecture   pass         0.2  architecture: ok
-typed-ternary  pass         0.1  typed ternaries: ok (22 files)
-wall-clock     pass         0.1  wall clock: ok (2 test scripts, 22 scripts in all)
-agents-md      pass         0.1  agents-md: ok (AGENTS.md: 159 lines, 8,519 bytes)
-tests          pass         3.5  Tests: PASSED. 15 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans
+architecture   pass         0.4  architecture: ok
+typed-ternary  pass         0.2  typed ternaries: ok (40 files)
+wall-clock     pass         0.1  wall clock: ok (5 test scripts, 40 scripts in all)
+agents-md      pass         0.1  agents-md: ok (AGENTS.md: 162 lines, 8,810 bytes)
+tests          pass        11.8  Tests: PASSED. 45 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans
 
-check: PASSED: 13 passed, 0 failed, 2 skipped in 15.1s
+check: PASSED: 14 passed, 0 failed, 1 skipped in 25.8s
 ```
 
 That is a new game. The kit's own tests, more than 1,300 for its tools and its addon, add
@@ -198,6 +214,8 @@ A game made from the template: every line. A game the kit was installed into: th
       Guide: [docs/customizing-agents-md.md](docs/customizing-agents-md.md).
 - [ ] Replace the sample game: `main.tscn`, `scripts/`, `test/unit/`, `test/sequences/`, its
       actions under `[input]` in `project.godot`. The full list is in the guide, section 3.
+- [ ] Delete the 3D showcase: `showcase/`, `test/showcase/`, `test/sequences/showcase.json`,
+      and its two modules in `tools/ci/architecture_modules.json`. It uses the sample's actions.
 - [ ] Set `kit.json`, the one configuration file: folders that are not your code, where tests
       live, the Godot pin. No folder layout is assumed. [Keys](docs/tools.md#kitjson).
 - [ ] Make `tools/ci/architecture_modules.json` match your folders, or delete it:

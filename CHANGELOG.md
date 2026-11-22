@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Showcase.** Lanternworks, a small 3D game in `showcase/`: a goblin lights four lanterns
+  on a floating island while the sun sets, and wakes a gearbox under the aurora. Physically
+  based materials made from generated noise maps (stone, enamelled iron, brass with patina,
+  wood, bark, skin with subsurface scattering, glass), dry-stone terraces, bounce light
+  (VoxelGI baked at start), screen-space reflections and indirect light, volumetric fog,
+  synthesised sound. No HUD: progress is in the world, and the pause veil holds three
+  sliders (motion, flash, shake). Pure rules in `showcase/core/isle.gd`; suites in
+  `test/showcase/`; `test/sequences/showcase.json` plays it through and screenshots each
+  beat. Run it with `pwsh ./tools/godot.ps1 res://showcase/showcase.tscn`.
 ## 0.2.0
 
 Fixes and lessons from using the kit since 0.1.0. Godot 4.7.2, gdUnit4 6.2.2, as before.

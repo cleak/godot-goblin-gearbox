@@ -30,6 +30,17 @@
       "globs": ["scripts/game/**", {"glob": "*.gd", "optional": true}],
       "may_depend": ["core"]
     },
+    "showcase_core": {
+      "_note": "The 3D showcase's rules: pure, like core.",
+      "globs": ["showcase/core/**"],
+      "may_depend": [],
+      "pure": true
+    },
+    "showcase_game": {
+      "_note": "The 3D showcase's nodes: input, views, DevTools commands.",
+      "globs": ["showcase/game/**"],
+      "may_depend": ["showcase_core"]
+    },
     "tests": {
       "globs": ["test/**"],
       "may_depend": ["*"]
