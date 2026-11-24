@@ -12,11 +12,11 @@ A `(default)` section is a starting rule the owner has not confirmed.
 ## Mission (sample)
 
 A sample game: light three lamps on a 7x5 grid. It exists to exercise the tools: keep it small.
-The 3D showcase, Lanternworks: `pwsh ./tools/godot.ps1 res://showcase/showcase.tscn`.
+Showcases: `pwsh ./tools/godot.ps1 res://showcase/showcase.tscn` (3D), `showcase_2d.tscn` (2D).
 
 ## Fixed decisions (sample)
 
-- 2D (showcase: 3D), Forward+, one player, keys: `move_left/right/up/down`, `interact`, `pause`.
+- 2D, a 3D showcase, Forward+, one player, keys: `move_left/right/up/down`, `interact`, `pause`.
 - Ask first: C#, GDExtension, a new addon, a new autoload.
 
 ## Layout (sample)
@@ -26,8 +26,9 @@ The 3D showcase, Lanternworks: `pwsh ./tools/godot.ps1 res://showcase/showcase.t
 | `scripts/core/` | Rules: pure `RefCounted`, no nodes | nothing |
 | `scripts/game/`, `main.tscn` | Nodes: input, drawing, DevTools commands | core |
 | `test/unit/`, `test/sequences/` | gdUnit4 suites; DevTools sequences (JSON) | any |
-| `showcase/` | 3D showcase: rules `showcase/core/`, nodes `showcase/game/` | its core |
-| `test/showcase/` | The showcase's suites; its sequence: `test/sequences/showcase.json` | any |
+| `showcase/core/`, `showcase/game/` | Showcases' rules; the 3D showcase's nodes | its core |
+| `showcase/game_2d/` | The 2D showcase's nodes | core, 3D nodes |
+| `test/showcase/` | Their suites. Sequences: `test/sequences/showcase.json`, `..._2d.json` | any |
 | `tools/`, `addons/`, `kit.json` | The kit and its config. `addons/gdUnit4/`: never edit | |
 
 ## Architecture (default)

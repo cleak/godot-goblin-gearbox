@@ -503,7 +503,7 @@ Where tests live in the template:
 | Folder | Holds |
 |---|---|
 | `<tests>/unit/`, `<tests>/sequences/` | Your game's suites and DevTools sequences. The sample game's are there now |
-| `<tests>/showcase/` | The 3D showcase's suites. They go when the showcase goes |
+| `<tests>/showcase/` | The showcases' suites (3D and 2D). They go when the showcases go |
 | `test/kit/` | The DevTools addon's own gdUnit4 suites |
 | `tools/tests/` | The tools' own pytest suite |
 

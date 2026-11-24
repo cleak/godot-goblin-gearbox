@@ -6,19 +6,27 @@ everything, and a way for the agent to drive the running game and look at it.
 GDScript. Windows and Linux. PowerShell 7, Python 3.12 through uv. MIT. Start a game from
 it, or install it into one you have.
 
+Two showcases, built by an agent with the kit and played through by a DevTools sequence
+that asserts state and takes a screenshot at each beat. All of each is code: no imported
+assets, synthesised sound, no HUD.
+
 ![Lanternworks, the 3D showcase: the gearbox wakes under the aurora](docs/images/showcase.png)
 
-**Lanternworks**, the showcase: a goblin tinker lights four lanterns on a floating island
-while the sun goes down, and the last one wakes the gearbox under the aurora. No HUD: the
-gearbox's bulbs and gauge keep count. An agent built it with the kit and plays it through
-`test/sequences/showcase.json`, asserting state and taking a screenshot at each beat. All of
-it is code: physically based materials from generated noise maps, eleven shaders, bounce
-light, synthesised sound, no imported assets.
+**Lanternworks** (3D): a goblin tinker lights four lanterns on a floating island while the
+sun goes down, and the last one wakes the gearbox under the aurora. Physically based
+materials from generated noise maps, bounce light, screen-space reflections, volumetric fog.
 ```sh
 pwsh ./tools/godot.ps1 res://showcase/showcase.tscn
 ```
 
-![Lanternworks in play at golden hour: three lanterns lit, the gearbox charging](docs/images/showcase_play.png)
+![Lamplight Quay, the 2D showcase: the lighthouse wakes over the harbour town](docs/images/showcase_2d.png)
+
+**Lamplight Quay** (2D): on a night of rain the goblin walks the harbour quay lighting four
+lamps, and the last one wakes the lighthouse. 2D lights with real-time shadows on
+normal-mapped brick and slate, rain that shows only where light falls on it, HDR glow.
+```sh
+pwsh ./tools/godot.ps1 res://showcase/showcase_2d.tscn
+```
 
 The kit's own sample game is smaller: light three lamps on a 2D grid.
 
@@ -36,23 +44,23 @@ with its asserts and take the picture above. The first:
 ```text
 Gate           Result   Seconds  Detail
 ----           ------   -------  ------
-ascii          pass         0.5  ASCII guard: CLEAN (16 PowerShell script(s))
-gdlint         pass         3.2  GDScript lint + format: CLEAN
-typecheck      pass         4.9  Type-check: CLEAN (40 of 40 files)
-project-lint   pass         0.7  LINT_PROJECT_OK errors=0 warnings=0
-shader-lint    pass         0.6  LINT_SHADERS_OK checked=11
-validate-all   pass         1.4  VALIDATE_ALL_OK loaded=40
-scenes         pass         0.5  DevTools: Scenes valid: 2 checked, 0 errors, 0 warnings
-test-lint      pass         0.7  Test lint: CLEAN (5 file(s))
+ascii          pass         0.4  ASCII guard: CLEAN (16 PowerShell script(s))
+gdlint         pass         2.9  GDScript lint + format: CLEAN
+typecheck      pass         5.5  Type-check: CLEAN (55 of 55 files)
+project-lint   pass         0.8  LINT_PROJECT_OK errors=0 warnings=0
+shader-lint    pass         0.8  LINT_SHADERS_OK checked=17
+validate-all   pass         1.5  VALIDATE_ALL_OK loaded=56
+scenes         pass         0.7  DevTools: Scenes valid: 3 checked, 0 errors, 0 warnings
+test-lint      pass         0.8  Test lint: CLEAN (7 file(s))
 ruff           pass         0.1  All checks passed!
 pytest         skipped        -  tools/tests not present
 architecture   pass         0.4  architecture: ok
-typed-ternary  pass         0.2  typed ternaries: ok (40 files)
-wall-clock     pass         0.1  wall clock: ok (5 test scripts, 40 scripts in all)
-agents-md      pass         0.1  agents-md: ok (AGENTS.md: 162 lines, 8,810 bytes)
-tests          pass        11.8  Tests: PASSED. 45 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans
+typed-ternary  pass         0.2  typed ternaries: ok (55 files)
+wall-clock     pass         0.3  wall clock: ok (7 test scripts, 55 scripts in all)
+agents-md      pass         0.1  agents-md: ok (AGENTS.md: 163 lines, 8,895 bytes)
+tests          pass        23.9  Tests: PASSED. 67 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans
 
-check: PASSED: 14 passed, 0 failed, 1 skipped in 25.8s
+check: PASSED: 14 passed, 0 failed, 1 skipped in 39.5s
 ```
 
 That is a new game. The kit's own tests, more than 1,300 for its tools and its addon, add
@@ -214,8 +222,9 @@ A game made from the template: every line. A game the kit was installed into: th
       Guide: [docs/customizing-agents-md.md](docs/customizing-agents-md.md).
 - [ ] Replace the sample game: `main.tscn`, `scripts/`, `test/unit/`, `test/sequences/`, its
       actions under `[input]` in `project.godot`. The full list is in the guide, section 3.
-- [ ] Delete the 3D showcase: `showcase/`, `test/showcase/`, `test/sequences/showcase.json`,
-      and its two modules in `tools/ci/architecture_modules.json`. It uses the sample's actions.
+- [ ] Delete the showcases: `showcase/`, `test/showcase/`, `test/sequences/showcase*.json`,
+      `docs/images/showcase*.png`, and their three `showcase_` modules in
+      `tools/ci/architecture_modules.json`. They use the sample's actions.
 - [ ] Set `kit.json`, the one configuration file: folders that are not your code, where tests
       live, the Godot pin. No folder layout is assumed. [Keys](docs/tools.md#kitjson).
 - [ ] Make `tools/ci/architecture_modules.json` match your folders, or delete it:

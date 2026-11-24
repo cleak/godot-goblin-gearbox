@@ -11,6 +11,15 @@
   sliders (motion, flash, shake). Pure rules in `showcase/core/isle.gd`; suites in
   `test/showcase/`; `test/sequences/showcase.json` plays it through and screenshots each
   beat. Run it with `pwsh ./tools/godot.ps1 res://showcase/showcase.tscn`.
+- **2D showcase.** Lamplight Quay, in `showcase/game_2d/`: on a night of rain the goblin
+  lights four lamps along a harbour quay, and the last wakes the lighthouse; the town's
+  windows light and the sky clears. 2D point lights with soft shadows from every prop on
+  the quay, brick, slate and stone drawn by one shader with normals and a wet highlight,
+  rain lit only inside the lamplight, parallax, HDR glow, reflections in the harbour water.
+  Pure rules in `showcase/core/quay.gd`; it borrows the 3D showcase's pause veil, springs
+  and sound. `test/sequences/showcase_2d.json` plays it through. Run it with
+  `pwsh ./tools/godot.ps1 res://showcase/showcase_2d.tscn`.
+
 ## 0.2.0
 
 Fixes and lessons from using the kit since 0.1.0. Godot 4.7.2, gdUnit4 6.2.2, as before.

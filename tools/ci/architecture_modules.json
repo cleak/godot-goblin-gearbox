@@ -31,7 +31,7 @@
       "may_depend": ["core"]
     },
     "showcase_core": {
-      "_note": "The 3D showcase's rules: pure, like core.",
+      "_note": "The showcases' rules (3D and 2D): pure, like core.",
       "globs": ["showcase/core/**"],
       "may_depend": [],
       "pure": true
@@ -40,6 +40,11 @@
       "_note": "The 3D showcase's nodes: input, views, DevTools commands.",
       "globs": ["showcase/game/**"],
       "may_depend": ["showcase_core"]
+    },
+    "showcase_game_2d": {
+      "_note": "The 2D showcase's nodes; it borrows the 3D one's pause veil, springs and sound.",
+      "globs": ["showcase/game_2d/**"],
+      "may_depend": ["showcase_core", "showcase_game"]
     },
     "tests": {
       "globs": ["test/**"],

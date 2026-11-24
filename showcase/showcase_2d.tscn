@@ -1,0 +1,10 @@
+[gd_scene format=3 uid="uid://dvoshdqc4xlf3"]
+
+[ext_resource type="Script" uid="uid://d2we8un06agp8" path="res://showcase/game_2d/harbour.gd" id="1_game"]
+[ext_resource type="Script" uid="uid://ctqxctwa4b5a8" path="res://showcase/game_2d/harbour_dev_commands.gd" id="2_dev"]
+
+[node name="Harbour" type="Node2D"]
+script = ExtResource("1_game")
+
+[node name="DevCommands" type="Node" parent="."]
+script = ExtResource("2_dev")

@@ -23,9 +23,11 @@ In the sample game (these files go when it goes):
   `test/unit/test_game.gd` drives the scene through input actions, as a player does.
 - `test/sequences/smoke.json` asserts those properties in the running game.
 
-The 3D showcase, Lanternworks, has the same layers in two modules of its own:
-`showcase_core` (`showcase/core/isle.gd`, pure) and `showcase_game` (`showcase/game/`, which
-may name `showcase_core` only). Its suites are in `test/showcase/`.
+The two showcases have the same layers in modules of their own: `showcase_core`
+(`showcase/core/`, pure: `isle.gd` for the 3D Lanternworks, `quay.gd` for the 2D Lamplight
+Quay), `showcase_game` (`showcase/game/`, the 3D nodes, which may name `showcase_core` only)
+and `showcase_game_2d` (`showcase/game_2d/`, the 2D nodes, which may also name
+`showcase_game` for its pause veil, springs and sound). Their suites are in `test/showcase/`.
 
 ## Why each line
 
