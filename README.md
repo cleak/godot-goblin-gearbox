@@ -6,6 +6,32 @@ everything, and a way for the agent to drive the running game and look at it.
 GDScript. Windows and Linux. PowerShell 7, Python 3.12 through uv. MIT. Start a game from
 it, or install it into one you have.
 
+Two showcases, built by an agent with the kit and played through by a DevTools sequence
+that asserts state and takes a screenshot at each beat. All of each is code: no imported
+assets, synthesised sound, no HUD. They live on branches of their own, out of the template.
+
+![Lanternworks, the 3D showcase: the gearbox wakes under the aurora](docs/images/showcase.png)
+
+**Lanternworks** (3D), on the `showcase-3d` branch: a goblin tinker lights four lanterns on
+a floating island while the sun goes down, and the last one wakes the gearbox under the
+aurora. Physically based materials from generated noise maps, bounce light, screen-space
+reflections, volumetric fog.
+
+![Lamplight Quay, the 2D showcase: the lighthouse wakes over the harbour town](docs/images/showcase_2d.png)
+
+**Lamplight Quay** (2D), on the `showcase-2d` branch (which has the 3D one too): on a night
+of rain the goblin walks the harbour quay lighting four lamps, and the last one wakes the
+lighthouse. 2D lights with real-time shadows on normal-mapped brick and slate, rain that
+shows only where light falls on it, HDR glow.
+
+To play them, switch to that branch; its README gives the command for each:
+
+```sh
+git switch showcase-2d
+```
+
+The kit's own sample game is smaller: light three lamps on a 2D grid.
+
 ![The sample game after the sequence: one lamp lit, the player on it](docs/images/smoke.png)
 
 ```sh
