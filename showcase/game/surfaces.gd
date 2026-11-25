@@ -16,10 +16,9 @@ const IRON: Color = Color(0.42, 0.42, 0.44)
 
 ## Name -> map, made once per process and shared.
 static var _maps: Dictionary[StringName, Texture2D] = {}
-static var _leaf_texture: ImageTexture = null
 
 
-## A noise map by name: rock, fine, soil, grain or grime; `normal` for its normal map.
+## A noise map by name: rock, fine, soil, grain, grime or leaf; `normal` for its normal map.
 static func map(map_name: StringName, normal: bool = false) -> Texture2D:
 	var key: StringName = StringName("%s_%s" % [map_name, "n" if normal else "h"])
 	if not _maps.has(key):
@@ -30,6 +29,8 @@ static func map(map_name: StringName, normal: bool = false) -> Texture2D:
 		texture.generate_mipmaps = true
 		texture.noise = _noise(map_name)
 		texture.as_normal_map = normal
+		# Cells rise in the middle, as clumps of leaves do, rather than sink.
+		texture.invert = map_name == &"leaf"
 		texture.bump_strength = _bump(map_name)
 		_maps[key] = texture
 	return _maps[key]
@@ -160,57 +161,11 @@ static func cloth(colour: Color, roughness: float = 0.85, weave: float = 0.6) ->
 	return out
 
 
-static func leaves(tint: Color) -> ShaderMaterial:
-	var out: ShaderMaterial = MeshKit.shader_material(LEAVES_SHADER)
-	out.set_shader_parameter(&"leaf_texture", leaf_texture())
-	out.set_shader_parameter(&"tint", tint)
-	return out
-
-
-## A cluster of leaves on transparency, drawn once: each leaf a pointed oval with a midrib.
-static func leaf_texture() -> ImageTexture:
-	if _leaf_texture != null:
-		return _leaf_texture
-	var size: int = 256
-	var image: Image = Image.create(size, size, false, Image.FORMAT_RGBA8)
-	image.fill(Color(0.2, 0.32, 0.1, 0.0))
-	var random: RandomNumberGenerator = RandomNumberGenerator.new()
-	random.seed = 77
-	var centre: Vector2 = Vector2(size, size) * 0.5
-	for leaf: int in range(46):
-		var at: Vector2 = centre + Vector2.from_angle(random.randf() * TAU) * random.randf() * 92.0
-		var angle: float = random.randf() * TAU
-		var length: float = random.randf_range(20.0, 30.0)
-		var width: float = length * random.randf_range(0.36, 0.48)
-		var hue: Color = Color(0.2, 0.34, 0.08).lerp(Color(0.42, 0.52, 0.12), random.randf())
-		hue = hue.lerp(Color(0.55, 0.42, 0.12), random.randf() * random.randf() * 0.6)
-		_draw_leaf(image, at, angle, length, width, hue)
-	image.generate_mipmaps()
-	_leaf_texture = ImageTexture.create_from_image(image)
-	return _leaf_texture
-
-
-static func _draw_leaf(
-	image: Image, at: Vector2, angle: float, length: float, width: float, hue: Color
-) -> void:
-	var along: Vector2 = Vector2.from_angle(angle)
-	var across: Vector2 = along.orthogonal()
-	var reach: int = ceili(length)
-	for y: int in range(maxi(int(at.y) - reach, 0), mini(int(at.y) + reach, image.get_height())):
-		for x: int in range(maxi(int(at.x) - reach, 0), mini(int(at.x) + reach, image.get_width())):
-			var offset: Vector2 = Vector2(x, y) - at
-			var u: float = offset.dot(along) / length  # -1 stem to 1 tip
-			var v: float = offset.dot(across) / width
-			# A pointed oval: widest just behind the middle, sharp at the tip.
-			var half: float = sqrt(maxf(1.0 - u * u, 0.0)) * (1.0 - maxf(u, 0.0) * 0.35)
-			if absf(u) > 1.0 or absf(v) > half:
-				continue
-			var edge: float = absf(v) / maxf(half, 0.001)
-			var shade: float = 0.75 + 0.3 * (1.0 - edge) + 0.1 * u
-			var rib: float = 1.0 - smoothstep(0.0, 0.08, absf(v))
-			var colour: Color = hue * shade
-			colour = colour.lerp(hue.lightened(0.35), rib * 0.6)
-			image.set_pixel(x, y, Color(colour, 1.0))
+## Leaves massed into tree crowns: clumps from a cellular map, see leaves.gdshader.
+static func leaves() -> ShaderMaterial:
+	return _with_maps(
+		LEAVES_SHADER, {&"clump_height": map(&"leaf"), &"clump_normal": map(&"leaf", true)}
+	)
 
 
 static func _with_maps(shader: Shader, maps: Dictionary[StringName, Texture2D]) -> ShaderMaterial:
@@ -254,6 +209,15 @@ static func _noise(map_name: StringName) -> FastNoiseLite:
 			noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 			noise.frequency = 0.008
 			noise.fractal_octaves = 6
+		&"leaf":
+			# Round cells, a little warped: clumps of leaves.
+			noise.seed = 61
+			noise.noise_type = FastNoiseLite.TYPE_CELLULAR
+			noise.cellular_return_type = FastNoiseLite.RETURN_DISTANCE
+			noise.frequency = 0.016
+			noise.fractal_octaves = 2
+			noise.domain_warp_enabled = true
+			noise.domain_warp_amplitude = 6.0
 		_:
 			push_error("Surfaces: no noise map named %s" % map_name)
 	return noise

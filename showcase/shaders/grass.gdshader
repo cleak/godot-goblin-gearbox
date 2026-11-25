@@ -16,9 +16,12 @@ uniform float push_radius = 0.55;
 uniform float awake : hint_range(0.0, 1.0) = 0.0;
 
 varying float tip;
+// Where the blade stands, for patches of colour across the lawn.
+varying vec2 ground;
 
 void vertex() {
 	tip = UV.y;
+	ground = VERTEX.xz;
 	float bend = tip * tip;
 	float gust = fbm(VERTEX.xz * 0.35 + vec2(TIME * 0.22, TIME * 0.13));
 	float flutter = sin(TIME * 2.7 + VERTEX.x * 3.1 + VERTEX.z * 2.3) * 0.25;
@@ -34,6 +37,11 @@ void vertex() {
 
 void fragment() {
 	vec3 colour = mix(root_color, tip_color, tip) * COLOR.rgb;
+	// Lush and sparse patches, and drifts where the grass has gone to seed.
+	float lush = fbm(ground * 0.8);
+	float seed = smoothstep(0.6, 0.72, fbm(ground * 0.6 + vec2(5.3, 1.7)));
+	colour *= mix(0.72, 1.18, lush);
+	colour = mix(colour, vec3(0.5, 0.5, 0.2) * COLOR.rgb, seed * tip * 0.3);
 	ALBEDO = colour;
 	ROUGHNESS = 0.85;
 	SPECULAR = 0.2;

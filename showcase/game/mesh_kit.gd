@@ -309,6 +309,33 @@ static func smooth_rock(radius: float, lumpiness: float, seed_value: int) -> Arr
 	return _smooth_commit(tool)
 
 
+## A tree's crown: one smooth, lumpy mass per `lumps` entry (centre xyz, radius w), in one
+## mesh. Each mass is a sphere pushed in and out by noise and a little flattened, so the
+## crown reads as clumps of leaves with a soft outline.
+static func canopy(lumps: Array[Vector4], lumpiness: float, seed_value: int) -> ArrayMesh:
+	var noise: FastNoiseLite = FastNoiseLite.new()
+	noise.seed = seed_value
+	noise.fractal_octaves = 2
+	var source: Array = sphere(1.0, 28, 14).get_mesh_arrays()
+	var points: PackedVector3Array = source[Mesh.ARRAY_VERTEX]
+	var indices: PackedInt32Array = source[Mesh.ARRAY_INDEX]
+	var tool: SurfaceTool = SurfaceTool.new()
+	tool.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for lump: int in range(lumps.size()):
+		var centre: Vector3 = Vector3(lumps[lump].x, lumps[lump].y, lumps[lump].z)
+		var radius: float = lumps[lump].w
+		noise.frequency = 1.6
+		for i: int in range(indices.size()):
+			var dir: Vector3 = points[indices[i]]
+			var push: float = (
+				1.0 + noise.get_noise_3dv(dir + Vector3(lump * 7.3, 0.0, 0.0)) * lumpiness
+			)
+			# Flatter underneath, as a crown hangs.
+			var shape: Vector3 = dir * push * Vector3(1.0, 0.82 if dir.y > 0.0 else 0.62, 1.0)
+			tool.add_vertex(centre + shape * radius)
+	return _smooth_commit(tool)
+
+
 ## A tapered tube along `path` (radius `radii` at each point), smooth-shaded: trunks,
 ## branches, roots, pipes.
 static func tube(path: Array[Vector3], radii: Array[float], sides: int = 8) -> ArrayMesh:

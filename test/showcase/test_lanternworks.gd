@@ -126,6 +126,27 @@ func test_the_fourth_lantern_wakes_the_gearbox() -> void:
 	assert_float(_game.dusk_shown).is_greater(0.0)
 
 
+## Once the gearbox wakes, the wide shot circles the island, so it shows as the solid thing
+## it is; with motion off it holds still, and a reset brings back the play shot's angle.
+func test_the_camera_circles_the_island_once_awake_and_holds_with_motion_off() -> void:
+	_game.motion_scale = 0.0
+	for action: StringName in LIGHT_ALL:
+		await _tap(action)
+	var camera: ShowcaseCamera = _game.get_node(^"Camera")
+	for _tick: int in range(30):
+		await get_tree().physics_frame
+	assert_float(camera.wide).is_equal(1.0)
+	assert_float(camera.orbit).is_zero()
+	_game.motion_scale = 1.0
+	for _tick: int in range(BEAT_TICKS_MAX):
+		if camera.orbit > 0.05:
+			break
+		await get_tree().physics_frame
+	assert_float(camera.orbit).is_greater(0.05)
+	_game.reset()
+	assert_float(camera.orbit).is_zero()
+
+
 ## Each landed spark sinks the sun a little; the fourth brings the night.
 func test_each_lantern_takes_the_day_towards_night() -> void:
 	_game.motion_scale = 0.0

@@ -56,6 +56,21 @@ func test_a_boulder_faces_outward() -> void:
 	_assert_outward(rock, rock.get_aabb().get_center())
 
 
+func test_a_crown_mass_faces_outward() -> void:
+	var lump: Vector4 = Vector4(0.3, 1.5, -0.2, 0.5)
+	var crown: ArrayMesh = MeshKit.canopy([lump], 0.28, 4)
+	_assert_outward(crown, Vector3(lump.x, lump.y, lump.z))
+
+
+func test_a_crown_holds_every_mass_it_was_given() -> void:
+	var lumps: Array[Vector4] = [Vector4(0.0, 1.5, 0.0, 0.5), Vector4(1.2, 1.2, 0.0, 0.4)]
+	var bounds: AABB = MeshKit.canopy(lumps, 0.28, 4).get_aabb()
+	assert_bool(bounds.has_point(Vector3(0.0, 1.5, 0.0))).is_true()
+	assert_bool(bounds.has_point(Vector3(1.2, 1.2, 0.0))).is_true()
+	# Lumpy, but each mass stays about the size it was asked to be.
+	assert_float(bounds.end.x).is_between(1.2 + 0.4 * 0.7, 1.2 + 0.4 * 1.3)
+
+
 func test_the_island_root_faces_outward() -> void:
 	var root: ArrayMesh = MeshKit.island_root(4.0, 6.0, 11)
 	var arrays: Array = root.surface_get_arrays(0)
