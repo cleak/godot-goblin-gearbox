@@ -10,12 +10,12 @@ Two showcases, built by an agent with the kit and played through by a DevTools s
 that asserts state and takes a screenshot at each beat. All of each is code: no imported
 assets, synthesised sound, no HUD. They live on branches of their own, out of the template.
 
-![Lanternworks, the 3D showcase: the gearbox wakes under the aurora](docs/images/showcase.png)
+![Lanternworks, the 3D showcase: the floating island at night, the gearbox awake under the aurora](docs/images/showcase.png)
 
 **Lanternworks** (3D), on the `showcase-3d` branch: a goblin tinker lights four lanterns on
-a floating island while the sun goes down, and the last one wakes the gearbox under the
-aurora. Physically based materials from generated noise maps, bounce light, screen-space
-reflections, volumetric fog.
+a floating island while the sun goes down, and the last one wakes the gearbox; the camera
+pulls back and circles the island under the aurora. Physically based materials from
+generated noise maps, bounce light, screen-space reflections, volumetric fog.
 
 ![Lamplight Quay, the 2D showcase: the lighthouse wakes over the harbour town](docs/images/showcase_2d.png)
 
