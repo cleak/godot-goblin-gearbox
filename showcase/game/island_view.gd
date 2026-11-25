@@ -17,7 +17,12 @@ const TURF_DEPTH: float = 0.1
 const POOL_DEPTH: float = 0.42
 ## The pool's surface, below the terrace top; its outer lip sits lower still, to spill.
 const WATER_LEVEL: float = 0.09
-const BLADES_PER_CELL: int = 110
+const TUFTS_PER_CELL: int = 16
+const BLADES_PER_TUFT: int = 11
+## How wide a blade is against the mesh's own leaf.
+const BLADE_WIDTH: float = 0.5
+## The chance that an open cell has a drift of flowers.
+const FLOWER_CHANCE: float = 0.35
 const SEED: int = 2026
 const DIRECTIONS: Array[Vector2i] = [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
 const GRASS_SHADER: Shader = preload("res://showcase/shaders/grass.gdshader")
@@ -74,7 +79,7 @@ func build(isle: Isle) -> void:
 	lawn.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(lawn)
 	_random.seed = SEED + 1
-	_leaf_material = Surfaces.leaves(Color.WHITE)
+	_leaf_material = Surfaces.leaves()
 	var bark: ShaderMaterial = Surfaces.bark()
 	for cell: Vector2i in isle.cells_with(Isle.Feature.TREE):
 		_build_tree(cell_top(isle, cell), bark)
@@ -82,6 +87,7 @@ func build(isle: Isle) -> void:
 	for cell: Vector2i in isle.cells_with(Isle.Feature.ROCK):
 		_build_boulder(cell_top(isle, cell), boulder)
 	_build_mushrooms()
+	_build_flowers()
 	_build_pool()
 	_build_root()
 
@@ -224,6 +230,8 @@ func _earth_mesh() -> ArrayMesh:
 	return tool.commit()
 
 
+## Grass in tufts: blades fan out from a few roots per cell, short and leaning outwards, so the
+## lawn reads as soft clumps with turf between them, not a bed of spikes.
 func _grass_mesh() -> MultiMesh:
 	var transforms: Array[Transform3D] = []
 	var colours: Array[Color] = []
@@ -232,22 +240,29 @@ func _grass_mesh() -> MultiMesh:
 		if feature == Isle.Feature.WATER or feature == Isle.Feature.GEARBOX:
 			continue
 		var top: Vector3 = cell_top(_isle, cell)
-		for blade: int in range(BLADES_PER_CELL):
-			var spot: Vector3 = (
+		for tuft: int in range(TUFTS_PER_CELL):
+			var root: Vector3 = (
 				top
-				+ (
-					Vector3(_random.randf_range(-0.48, 0.48), 0.0, _random.randf_range(-0.48, 0.48))
-					* CELL
-				)
+				+ Vector3(_random.randf_range(-0.46, 0.46), 0.0, _random.randf_range(-0.46, 0.46))
 			)
-			var tall: float = _random.randf_range(0.1, 0.24)
-			var turn: Basis = Basis(Vector3.UP, _random.randf_range(0.0, TAU))
-			var tilt: Basis = Basis(Vector3.RIGHT, _random.randf_range(-0.3, 0.3))
-			var shape: Basis = (turn * tilt).scaled(Vector3(1.0, tall, 1.0))
-			transforms.append(Transform3D(shape, spot))
-			var shade: float = _random.randf_range(0.7, 1.2)
-			var dry: float = _random.randf() * _random.randf()
-			colours.append(Color(shade, shade, shade).lerp(Color(1.5, 1.2, 0.6), dry * 0.5))
+			var tuft_tall: float = _random.randf_range(0.07, 0.15)
+			var tuft_shade: float = _random.randf_range(0.8, 1.15)
+			for blade: int in range(BLADES_PER_TUFT):
+				var around: float = _random.randf() * TAU
+				var spread: float = sqrt(_random.randf()) * 0.07
+				var spot: Vector3 = root + Vector3(cos(around), 0.0, sin(around)) * spread
+				var tall: float = tuft_tall * _random.randf_range(0.6, 1.15)
+				# Blades lean away from the tuft's middle, more the further out they stand.
+				var turn: Basis = Basis(Vector3.UP, -around + PI * 0.5)
+				var tilt: Basis = Basis(
+					Vector3.RIGHT, spread * 6.0 + _random.randf_range(0.0, 0.25)
+				)
+				# Narrow blades: the mesh is a long leaf, cut down to the blade's height.
+				var shape: Basis = (turn * tilt).scaled(Vector3(BLADE_WIDTH, tall, BLADE_WIDTH))
+				transforms.append(Transform3D(shape, spot))
+				var shade: float = tuft_shade * _random.randf_range(0.85, 1.1)
+				var dry: float = _random.randf() * _random.randf()
+				colours.append(Color(shade, shade, shade).lerp(Color(1.5, 1.2, 0.6), dry * 0.45))
 	var multimesh: MultiMesh = MultiMesh.new()
 	multimesh.transform_format = MultiMesh.TRANSFORM_3D
 	multimesh.use_colors = true
@@ -259,8 +274,58 @@ func _grass_mesh() -> MultiMesh:
 	return multimesh
 
 
+## Wild flowers in small drifts: a head of petals on a short stalk, three colours.
+func _build_flowers() -> void:
+	var colours: Array[Color] = [
+		Color(0.95, 0.93, 0.85), Color(1.0, 0.8, 0.25), Color(0.85, 0.5, 0.85)
+	]
+	var heads: Array[Transform3D] = []
+	var tints: Array[Color] = []
+	for cell: Vector2i in _isle.ground_cells():
+		if not _isle.is_open(cell) or _random.randf() > FLOWER_CHANCE:
+			continue
+		var top: Vector3 = cell_top(_isle, cell)
+		var drift: Vector3 = (
+			top + Vector3(_random.randf_range(-0.3, 0.3), 0.0, _random.randf_range(-0.3, 0.3))
+		)
+		var colour: Color = colours[_random.randi() % colours.size()]
+		for i: int in range(_random.randi_range(4, 8)):
+			var spot: Vector3 = (
+				drift
+				+ Vector3(_random.randf_range(-0.16, 0.16), 0.0, _random.randf_range(-0.16, 0.16))
+			)
+			var tall: float = _random.randf_range(0.09, 0.17)
+			var size: float = _random.randf_range(0.8, 1.2)
+			var lean: Basis = Basis(Vector3.RIGHT, _random.randf_range(-0.4, 0.4))
+			lean = Basis(Vector3.UP, _random.randf() * TAU) * lean
+			heads.append(
+				Transform3D(
+					lean.scaled(Vector3(size, size * 0.6, size)), spot + Vector3(0, tall, 0)
+				)
+			)
+			tints.append(colour * _random.randf_range(0.85, 1.05))
+	var multimesh: MultiMesh = MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.use_colors = true
+	multimesh.mesh = MeshKit.sphere(0.022, 8, 4)
+	multimesh.instance_count = heads.size()
+	for i: int in range(heads.size()):
+		multimesh.set_instance_transform(i, heads[i])
+		multimesh.set_instance_color(i, tints[i])
+	var petals: StandardMaterial3D = MeshKit.material(Color.WHITE, 0.55)
+	petals.vertex_color_use_as_albedo = true
+	petals.backlight_enabled = true
+	petals.backlight = Color(0.4, 0.35, 0.3)
+	var bed: MultiMeshInstance3D = MultiMeshInstance3D.new()
+	bed.name = "Flowers"
+	bed.multimesh = multimesh
+	bed.material_override = petals
+	bed.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(bed)
+
+
 ## An old, wind-bent tree: a twisting trunk with root flare, three or four limbs, and
-## crowns of leaf cards that glow when the low sun is behind them.
+## a crown of lumpy leaf masses over them that glows where the low sun shines through.
 func _build_tree(at: Vector3, bark: ShaderMaterial) -> void:
 	var tree: Node3D = Node3D.new()
 	add_child(tree)
@@ -300,45 +365,21 @@ func _build_tree(at: Vector3, bark: ShaderMaterial) -> void:
 			limb_radii.append(lerpf(radii[start_index] * 0.7, 0.015, s))
 		MeshKit.add_mesh(tree, MeshKit.tube(path, limb_radii, 6), bark)
 		crowns.append(path[4])
-	var leaves: MeshInstance3D = MeshKit.add_mesh(tree, _leaf_cards(crowns), _leaf_material)
+	# The crown: a big mass over the trunk, a smaller one at each limb's end.
+	var lumps: Array[Vector4] = []
+	for i: int in range(crowns.size()):
+		var crown: Vector3 = crowns[i]
+		var size: float = (
+			_random.randf_range(0.56, 0.66) if i == 0 else _random.randf_range(0.38, 0.48)
+		)
+		lumps.append(Vector4(crown.x, crown.y + size * 0.15, crown.z, size))
+	var leaves: MeshInstance3D = MeshKit.add_mesh(
+		tree, MeshKit.canopy(lumps, 0.28, _random.randi()), _leaf_material
+	)
+	leaves.name = "Crown"
 	leaves.set_instance_shader_parameter(&"phase", _random.randf_range(0.0, TAU))
-
-
-## Leaf cards round each crown centre, in one mesh.
-func _leaf_cards(crowns: Array[Vector3]) -> ArrayMesh:
-	var tool: SurfaceTool = SurfaceTool.new()
-	tool.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var corners: Array[Vector2] = [Vector2(-1, -1), Vector2(1, -1), Vector2(1, 1), Vector2(-1, 1)]
-	for crown: Vector3 in crowns:
-		for card: int in range(14):
-			var offset: Vector3 = (
-				(
-					Vector3(
-						_random.randf_range(-1.0, 1.0),
-						_random.randf_range(-0.6, 0.8),
-						_random.randf_range(-1.0, 1.0)
-					)
-					. limit_length(1.0)
-				)
-				* 0.36
-			)
-			var facing: Basis = Basis.from_euler(
-				Vector3(
-					_random.randf_range(-1.2, 1.2),
-					_random.randf() * TAU,
-					_random.randf_range(-0.6, 0.6)
-				)
-			)
-			var size: float = _random.randf_range(0.32, 0.46)
-			var points: Array[Vector3] = []
-			for corner: Vector2 in corners:
-				points.append(crown + offset + facing * Vector3(corner.x, corner.y, 0.0) * size)
-			var normal: Vector3 = facing * Vector3.BACK
-			for k: int in [0, 1, 2, 0, 2, 3]:
-				tool.set_normal(normal)
-				tool.set_uv(corners[k] * 0.5 + Vector2(0.5, 0.5))
-				tool.add_vertex(points[k])
-	return tool.commit()
+	var hue: Color = Color(1.0, 1.0, 1.0).lerp(Color(1.25, 1.05, 0.7), _random.randf() * 0.6)
+	leaves.set_instance_shader_parameter(&"tint", hue)
 
 
 func _build_boulder(at: Vector3, stone: ShaderMaterial) -> void:

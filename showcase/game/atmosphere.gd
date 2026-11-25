@@ -80,7 +80,7 @@ func bake_bounce_light(extent: Vector3, centre: Vector3) -> void:
 	if DisplayServer.get_name() == "headless":
 		return
 	_bounce.bake()
-	_bounce.data.energy = 1.4
+	_bounce.data.energy = 1.0
 	_bounce.data.propagation = 0.7
 	_bounce.data.bias = 1.2
 
@@ -161,7 +161,7 @@ func _build_environment() -> void:
 	environment.volumetric_fog_sky_affect = 0.0
 	environment.adjustment_enabled = true
 	environment.adjustment_saturation = 1.08
-	environment.adjustment_contrast = 1.06
+	environment.adjustment_contrast = 1.12
 	var world: WorldEnvironment = WorldEnvironment.new()
 	world.name = "WorldEnvironment"
 	world.environment = environment
@@ -244,7 +244,7 @@ func _apply() -> void:
 	var elevation: float = lerpf(SUN_HIGH, SUN_LOW, smoothstep(0.0, 0.8, dusk))
 	_sun.rotation = Vector3(deg_to_rad(-elevation), deg_to_rad(SUN_YAW), 0.0)
 	_sun.light_color = SUN_GOLD.lerp(SUN_RED, twilight)
-	_sun.light_energy = 4.2 * day
+	_sun.light_energy = 5.0 * day
 	_sun.visible = day > 0.001
 	_moon.light_energy = 0.42 * night + 0.12 * awake
 	_moon.visible = night > 0.001
@@ -254,13 +254,13 @@ func _apply() -> void:
 	_sky_material.set_shader_parameter(&"moon_direction", _moon.global_basis.z)
 	var fog: Color = FOG_GOLD.lerp(FOG_TWILIGHT, twilight).lerp(FOG_NIGHT, night)
 	environment.fog_light_color = fog.lerp(Color(0.1, 0.26, 0.3), awake * 0.6)
-	environment.volumetric_fog_density = lerpf(0.0015, 0.01, night)
+	environment.volumetric_fog_density = lerpf(0.0015, 0.004, night)
 	environment.volumetric_fog_albedo = fog.lerp(Color(0.6, 0.95, 0.85), awake * 0.5)
-	environment.ambient_light_energy = lerpf(0.28, 0.5, night) + awake * 0.2
+	environment.ambient_light_energy = lerpf(0.2, 0.3, night) + awake * 0.1
 	environment.tonemap_exposure = lerpf(1.0, 1.1, night)
 	var lit: Color = Color(1.25, 0.95, 0.72).lerp(Color(0.85, 0.5, 0.6), twilight)
-	lit = lit.lerp(Color(0.5, 0.57, 0.82), night)
-	var shade: Color = Color(0.3, 0.34, 0.55).lerp(Color(0.07, 0.09, 0.2), night)
+	lit = lit.lerp(Color(0.3, 0.38, 0.62), night)
+	var shade: Color = Color(0.3, 0.34, 0.55).lerp(Color(0.025, 0.035, 0.09), night)
 	for surface: ShaderMaterial in _cloud_materials:
 		surface.set_shader_parameter(&"awake", awake)
 		surface.set_shader_parameter(&"lit_color", lit)

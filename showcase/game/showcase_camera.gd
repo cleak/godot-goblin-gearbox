@@ -1,14 +1,22 @@
 class_name ShowcaseCamera
 extends Camera3D
-## A tilt-shift camera over the diorama. It follows a focus point on a spring, drifts as if
-## held by hand, and shakes by trauma squared (docs/feel.md). Never for walking.
+## A tilt-shift camera over the diorama. It looks across the island's south-east corner, so
+## two sides of every terrace show; follows a focus point on a spring, drifts as if held by
+## hand, and shakes by trauma squared (docs/feel.md). Once the gearbox wakes it pulls back and
+## circles the island. Never for walking.
 
-const OFFSET: Vector3 = Vector3(0.0, 7.0, 10.8)
-## The wide shot once the gearbox wakes: lower and further back, looking up into the sky.
-const WIDE_OFFSET: Vector3 = Vector3(0.0, 2.9, 13.0)
-const WIDE_LIFT: Vector3 = Vector3(0.0, 2.2, 0.0)
+const OFFSET: Vector3 = Vector3(0.0, 7.4, 11.0)
+## The wide shot once the gearbox wakes: further back, still above the terraces, the focus
+## lifted so the beam and the aurora fill the top of the frame.
+const WIDE_OFFSET: Vector3 = Vector3(0.0, 5.2, 14.2)
+const WIDE_LIFT: Vector3 = Vector3(0.0, 1.1, 0.0)
 const FOV: float = 36.0
 const WIDE_FOV: float = 44.0
+## The turn off the island's south axis, in radians (32 degrees): a three-quarter view. Small
+## enough that up still reads as up on screen.
+const YAW: float = 0.56
+## How fast the wide shot circles the island, in radians a second.
+const ORBIT_SPEED: float = 0.11
 const TRAUMA_DECAY: float = 1.8
 ## 0.6 degrees.
 const MAX_ROLL: float = 0.0105
@@ -20,6 +28,8 @@ var focus: Vector3 = Vector3.ZERO
 var trauma: float = 0.0
 ## 0 the play shot, 1 the wide shot that shows the sky; Lanternworks eases it.
 var wide: float = 0.0
+## How far the wide shot has circled, in radians; 0 until the gearbox wakes.
+var orbit: float = 0.0
 var shake_scale: float = 1.0
 var motion_scale: float = 1.0
 
@@ -35,10 +45,10 @@ func _ready() -> void:
 	far = 300.0
 	var lens: CameraAttributesPractical = CameraAttributesPractical.new()
 	lens.dof_blur_far_enabled = true
-	lens.dof_blur_far_distance = 17.0
-	lens.dof_blur_far_transition = 9.0
+	lens.dof_blur_far_distance = 19.0
+	lens.dof_blur_far_transition = 10.0
 	lens.dof_blur_near_enabled = true
-	lens.dof_blur_near_distance = 8.0
+	lens.dof_blur_near_distance = 7.0
 	lens.dof_blur_near_transition = 3.0
 	lens.dof_blur_amount = 0.06
 	attributes = lens
@@ -55,10 +65,11 @@ func add_trauma(amount: float) -> void:
 	trauma = clampf(trauma + amount, 0.0, 1.0)
 
 
-## Jumps to the focus with no follow: for a reset.
+## Jumps to the focus with no follow, back to the play shot's angle: for a reset.
 func snap() -> void:
 	_follow.snap(focus)
 	trauma = 0.0
+	orbit = 0.0
 	_place(Vector3.ZERO, 0.0)
 
 
@@ -70,6 +81,8 @@ func _process(delta: float) -> void:
 		_follow.snap(focus)
 	else:
 		_follow.step(delta)
+	# The circle eases in with the wide shot, and stands still with motion turned off.
+	orbit = wrapf(orbit + ORBIT_SPEED * smoothstep(0.0, 1.0, wide) * motion_scale * delta, 0.0, TAU)
 	var shake: float = trauma * trauma * shake_scale
 	var jitter: Vector3 = (
 		Vector3(_noise.get_noise_2d(_time * 25.0, 0.0), _noise.get_noise_2d(0.0, _time * 25.0), 0.0)
@@ -86,8 +99,9 @@ func _process(delta: float) -> void:
 
 func _place(offset: Vector3, roll: float) -> void:
 	var blend: float = smoothstep(0.0, 1.0, wide)
+	var turn: Basis = Basis(Vector3.UP, YAW + orbit)
 	var target: Vector3 = _follow.value + WIDE_LIFT * blend
 	fov = lerpf(FOV, WIDE_FOV, blend)
-	position = _follow.value + OFFSET.lerp(WIDE_OFFSET, blend) + offset
-	look_at(target + offset * 0.5, Vector3.UP)
+	position = _follow.value + turn * (OFFSET.lerp(WIDE_OFFSET, blend) + offset)
+	look_at(target + turn * offset * 0.5, Vector3.UP)
 	rotate_object_local(Vector3.BACK, roll)

@@ -27,7 +27,7 @@ vec3 stars(vec3 dir) {
 	float dist = length(dir - normalize(centre)) * 260.0;
 	float twinkle = 0.6 + 0.4 * sin(TIME * (1.5 + pick * 3.0) + pick * 40.0);
 	vec3 colour = mix(vec3(0.75, 0.85, 1.0), vec3(1.0, 0.85, 0.7), hash31(cell + 7.0));
-	return colour * smoothstep(0.55, 0.0, dist) * twinkle * star_brightness;
+	return colour * smoothstep(0.32, 0.0, dist) * twinkle * star_brightness;
 }
 
 vec3 aurora_curtains(vec3 dir) {
@@ -46,7 +46,7 @@ vec3 aurora_curtains(vec3 dir) {
 		vec3 colour = mix(aurora_low, aurora_high, clamp(dir.y * 1.6 + float(layer) * 0.2, 0.0, 1.0));
 		total += colour * band * streaks * fade * (1.0 - float(layer) * 0.25);
 	}
-	return total * 0.75;
+	return total * 1.3;
 }
 
 // One palette of the sky: zenith, horizon, the glow towards the sun, and below the horizon.
@@ -65,8 +65,8 @@ vec3 backdrop(vec3 dir) {
 		vec3(1.4, 0.72, 0.32), vec3(0.42, 0.36, 0.38), 3.0);
 	vec3 twilight = palette(dir, vec3(0.08, 0.12, 0.34), vec3(0.62, 0.36, 0.46),
 		vec3(1.0, 0.42, 0.24), vec3(0.16, 0.14, 0.24), 2.0);
-	vec3 night = palette(dir, vec3(0.018, 0.026, 0.08), vec3(0.09, 0.11, 0.24),
-		vec3(0.22, 0.14, 0.24), vec3(0.06, 0.07, 0.15), 2.0);
+	vec3 night = palette(dir, vec3(0.006, 0.011, 0.04), vec3(0.035, 0.065, 0.15),
+		vec3(0.1, 0.07, 0.14), vec3(0.02, 0.03, 0.07), 2.0);
 	vec3 colour = mix(gold, twilight, smoothstep(0.0, 0.55, dusk));
 	colour = mix(colour, night, smoothstep(0.45, 1.0, dusk));
 	return colour + aurora_curtains(dir) * aurora;
