@@ -32,8 +32,6 @@ git switch showcase-2d
 
 The kit's own sample game is smaller: light three lamps on a 2D grid.
 
-![The sample game after the sequence: one lamp lit, the player on it](docs/images/smoke.png)
-
 ```sh
 pwsh ./tools/check.ps1
 uv run python tools/devtools.py input sequence test/sequences/smoke.json
@@ -41,7 +39,7 @@ uv run python tools/devtools.py screenshot --filename smoke.png
 ```
 
 After [Start](#start). The last two need the game running: they play a sequence of inputs
-with its asserts and take the picture above. The first:
+with its asserts and take a screenshot. The first:
 
 ```text
 Gate           Result   Seconds  Detail

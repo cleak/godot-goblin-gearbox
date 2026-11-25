@@ -302,7 +302,7 @@ passed in, or a fact read from documentation or source.
   the screen unlocked. Whether a game started from a shell opens in front is not known.
 - Forward+ runs on Metal on Apple silicon (`rendering/rendering_device/driver.macos`); on an
   Intel Mac Godot switches to Vulkan (MoltenVK). No capture from a Mac was ever compared
-  with `docs/images/smoke.png`.
+  with one from Windows or Linux.
 - On a Retina display the window is 576x324 points; the viewport and the capture stay
   1152x648.
 - Without a main scene Godot shows an alert and waits for a click, with `--headless` too
